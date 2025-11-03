@@ -11,18 +11,62 @@ function VideoTimeline({ videoInfo, currentTime, onSeek, videoKey }) {
 
   useEffect(() => {
     if (videoKey && videoInfo) {
-      // Thumbnails disabled for performance - show placeholder segments
-      const totalSegments = Math.ceil(videoInfo.duration / 10);
-      const placeholderThumbnails = [];
-      for (let i = 0; i < totalSegments; i++) {
-        placeholderThumbnails.push({
-          segmentIndex: i,
-          time: i * 10 + 5,
-          data: null,
-          cached: null
-        });
-      }
-      setThumbnails(placeholderThumbnails);
+      // Fetch actual thumbnails from the API
+      const fetchThumbnails = async () => {
+        try {
+          console.log('Fetching thumbnails for video:', videoKey);
+          const thumbnailData = await api.getThumbnails(videoKey, { segmentDuration: 10 });
+          console.log('Received thumbnails:', thumbnailData.length, 'thumbnails');
+          setThumbnails(thumbnailData);
+          
+          // If some thumbnails are still missing, set up polling to check for updates
+          const missingThumbnails = thumbnailData.filter(t => !t.data).length;
+          if (missingThumbnails > 0) {
+            console.log(`${missingThumbnails} thumbnails still missing, will poll for updates`);
+            
+            const pollInterval = setInterval(async () => {
+              try {
+                const updatedThumbnails = await api.getThumbnails(videoKey, { segmentDuration: 10 });
+                const newlyAvailable = updatedThumbnails.filter(t => t.data).length;
+                const previouslyAvailable = thumbnailData.filter(t => t.data).length;
+                
+                if (newlyAvailable > previouslyAvailable) {
+                  console.log(`Found ${newlyAvailable - previouslyAvailable} new thumbnails`);
+                  setThumbnails(updatedThumbnails);
+                }
+                
+                // Stop polling when all thumbnails are available
+                if (updatedThumbnails.every(t => t.data)) {
+                  console.log('All thumbnails loaded, stopping poll');
+                  clearInterval(pollInterval);
+                }
+              } catch (error) {
+                console.warn('Thumbnail polling error:', error);
+              }
+            }, 2000); // Poll every 2 seconds
+            
+            // Clean up interval on unmount or when dependencies change
+            return () => clearInterval(pollInterval);
+          }
+        } catch (error) {
+          console.warn('Failed to fetch thumbnails, using placeholders:', error);
+          // Fallback to placeholder segments if thumbnail fetch fails
+          const totalSegments = Math.ceil(videoInfo.duration / 10);
+          const placeholderThumbnails = [];
+          for (let i = 0; i < totalSegments; i++) {
+            placeholderThumbnails.push({
+              segmentIndex: i,
+              time: i * 10 + 5,
+              data: null,
+              cached: null,
+              source: 'placeholder'
+            });
+          }
+          setThumbnails(placeholderThumbnails);
+        }
+      };
+
+      fetchThumbnails();
     }
   }, [videoKey, videoInfo]);
 
@@ -162,7 +206,7 @@ function VideoTimeline({ videoInfo, currentTime, onSeek, videoKey }) {
                 flex: 1,
                 height: '100%',
                 backgroundColor: thumb.data ? 'transparent' : '#4a4a4a',
-                backgroundImage: thumb.data ? `url(data:image/png;base64,${thumb.data})` : 'none',
+                backgroundImage: thumb.data ? `url(${thumb.data})` : 'none',
                 backgroundSize: 'cover',
                 backgroundPosition: 'center',
                 borderRight: index < thumbnails.length - 1 ? '1px solid #2a2a2a' : 'none'
@@ -239,7 +283,7 @@ function VideoTimeline({ videoInfo, currentTime, onSeek, videoKey }) {
         color: '#888'
       }}>
         <span>{formatTime(currentTime)}</span>
-        <span>Click timeline to seek • Thumbnails disabled for performance</span>
+        <span>Click timeline to seek • {thumbnails.some(t => t.data) ? 'Thumbnails loaded' : 'Loading thumbnails...'}</span>
         <span>{formatTime(videoInfo.duration)}</span>
       </div>
     </div>
