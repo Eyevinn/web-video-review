@@ -1,7 +1,8 @@
 const ffmpeg = require('fluent-ffmpeg');
 const { spawn } = require('child_process');
 const { Readable } = require('stream');
-const fs = require('fs');
+const fs = require('fs').promises;
+const fsSync = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
@@ -84,8 +85,8 @@ class VideoService {
 
   initializeCacheDirectory() {
     try {
-      if (!fs.existsSync(this.localCacheDir)) {
-        fs.mkdirSync(this.localCacheDir, { recursive: true });
+      if (!fsSync.existsSync(this.localCacheDir)) {
+        fsSync.mkdirSync(this.localCacheDir, { recursive: true });
         console.log(`Created local cache directory: ${this.localCacheDir}`);
       }
       console.log(`Local cache directory: ${this.localCacheDir} (max size: ${(this.maxLocalCacheSize / 1024 / 1024 / 1024).toFixed(1)}GB)`);
@@ -101,7 +102,7 @@ class VideoService {
     return path.join(this.localCacheDir, `${hash}${ext}`);
   }
 
-  async ensureLocalFile(s3Key) {
+  async ensureLocalFile(s3Key, requiredDuration = null, segmentStartTime = 0) {
     if (!this.enableLocalCache) {
       return null;
     }
@@ -109,18 +110,39 @@ class VideoService {
     const localPath = this.getLocalFilePath(s3Key);
     
     // Check if file already exists locally
-    if (fs.existsSync(localPath)) {
-      // Update access time for LRU cleanup
-      const stats = fs.statSync(localPath);
-      this.localFileCache.set(s3Key, {
-        path: localPath,
-        size: stats.size,
-        lastAccessed: new Date(),
-        downloadTime: this.localFileCache.get(s3Key)?.downloadTime || new Date()
-      });
+    if (fsSync.existsSync(localPath)) {
+      const stats = fsSync.statSync(localPath);
       
-      console.log(`[Local Cache] Using cached file for ${s3Key}`);
-      return localPath;
+      // If we need to check for sufficient data for early segments
+      if (requiredDuration !== null) {
+        const hasEnoughData = await this.checkSufficientDataForDuration(s3Key, localPath, requiredDuration);
+        if (!hasEnoughData) {
+          console.log(`[Local Cache] File doesn't have enough data for ${requiredDuration}s, downloading more...`);
+          // Continue with download to get more data
+        } else {
+          // Update access time for LRU cleanup
+          this.localFileCache.set(s3Key, {
+            path: localPath,
+            size: stats.size,
+            lastAccessed: new Date(),
+            downloadTime: this.localFileCache.get(s3Key)?.downloadTime || new Date()
+          });
+          
+          console.log(`[Local Cache] Using cached file for ${s3Key} (sufficient data)`);
+          return localPath;
+        }
+      } else {
+        // Update access time for LRU cleanup
+        this.localFileCache.set(s3Key, {
+          path: localPath,
+          size: stats.size,
+          lastAccessed: new Date(),
+          downloadTime: this.localFileCache.get(s3Key)?.downloadTime || new Date()
+        });
+        
+        console.log(`[Local Cache] Using cached file for ${s3Key}`);
+        return localPath;
+      }
     }
 
     // Check if download is already in progress
@@ -129,9 +151,9 @@ class VideoService {
       return await this.activeDownloads.get(s3Key);
     }
 
-    // Start download
-    console.log(`[Local Cache] Starting download of ${s3Key}`);
-    const downloadPromise = this.downloadFileToLocal(s3Key, localPath);
+    // Start download - always do full download but prioritize getting enough data quickly
+    console.log(`[Local Cache] Starting download of ${s3Key}${requiredDuration ? ` (need ${requiredDuration}s)` : ''}`);
+    const downloadPromise = this.downloadFileToLocal(s3Key, localPath, requiredDuration);
     this.activeDownloads.set(s3Key, downloadPromise);
 
     try {
@@ -144,13 +166,14 @@ class VideoService {
     }
   }
 
-  async downloadFileToLocal(s3Key, localPath) {
+  async downloadFileToLocal(s3Key, localPath, requiredDuration = null) {
     return new Promise((resolve, reject) => {
       const startTime = Date.now();
+      let hasResolved = false;
       
       try {
         const signedUrl = s3Service.getSignedUrl(s3Key, 3600);
-        const writeStream = fs.createWriteStream(localPath);
+        const writeStream = fsSync.createWriteStream(localPath);
         
         // Use signed URL to download via HTTP
         const https = require('https');
@@ -165,59 +188,143 @@ class VideoService {
 
           const totalSize = parseInt(response.headers['content-length'] || '0');
           let downloadedSize = 0;
+          let lastSufficientCheck = 0;
 
           response.on('data', (chunk) => {
             downloadedSize += chunk.length;
             writeStream.write(chunk);
+            
+            // Check if we have sufficient data periodically (every 1MB downloaded)
+            if (requiredDuration && !hasResolved && downloadedSize - lastSufficientCheck > 1024 * 1024) {
+              lastSufficientCheck = downloadedSize;
+              
+              // Check if we have enough data asynchronously
+              setImmediate(async () => {
+                try {
+                  const hasEnough = await this.checkSufficientDataForDuration(s3Key, localPath, requiredDuration);
+                  if (hasEnough && !hasResolved) {
+                    hasResolved = true;
+                    const downloadTime = Date.now() - startTime;
+                    const sizeMB = (downloadedSize / 1024 / 1024).toFixed(2);
+                    
+                    console.log(`[Local Cache] Early resolve - sufficient data for ${requiredDuration}s (${sizeMB}MB) in ${downloadTime}ms`);
+                    
+                    // Update cache tracking with partial data
+                    this.localFileCache.set(s3Key, {
+                      path: localPath,
+                      size: downloadedSize,
+                      lastAccessed: new Date(),
+                      downloadTime: new Date(),
+                      isPartial: true // Mark as partial download
+                    });
+                    
+                    resolve(localPath);
+                    // Continue downloading in background, don't destroy the stream
+                  }
+                } catch (error) {
+                  console.warn(`[Local Cache] Error checking sufficient data during download:`, error.message);
+                }
+              });
+            }
           });
 
           response.on('end', () => {
             writeStream.end();
             
-            const downloadTime = Date.now() - startTime;
-            const sizeMB = (downloadedSize / 1024 / 1024).toFixed(2);
-            const speedMBps = (downloadedSize / 1024 / 1024 / (downloadTime / 1000)).toFixed(2);
-            
-            console.log(`[Local Cache] Downloaded ${s3Key} (${sizeMB}MB) in ${downloadTime}ms (${speedMBps}MB/s)`);
-            
-            // Update cache tracking
-            this.localFileCache.set(s3Key, {
-              path: localPath,
-              size: downloadedSize,
-              lastAccessed: new Date(),
-              downloadTime: new Date()
-            });
+            if (!hasResolved) {
+              const downloadTime = Date.now() - startTime;
+              const sizeMB = (downloadedSize / 1024 / 1024).toFixed(2);
+              const speedMBps = (downloadedSize / 1024 / 1024 / (downloadTime / 1000)).toFixed(2);
+              
+              console.log(`[Local Cache] Complete download of ${s3Key} (${sizeMB}MB) in ${downloadTime}ms (${speedMBps}MB/s)`);
+              
+              // Update cache tracking with complete data
+              this.localFileCache.set(s3Key, {
+                path: localPath,
+                size: downloadedSize,
+                lastAccessed: new Date(),
+                downloadTime: new Date(),
+                isPartial: false // Mark as complete download
+              });
 
-            // Clean up cache if needed
-            this.cleanupCacheIfNeeded();
-            
-            resolve(localPath);
+              // Clean up cache if needed
+              this.cleanupCacheIfNeeded();
+              
+              resolve(localPath);
+            } else {
+              // Update the existing cache entry to mark as complete
+              const existing = this.localFileCache.get(s3Key);
+              if (existing) {
+                existing.size = downloadedSize;
+                existing.isPartial = false;
+                this.localFileCache.set(s3Key, existing);
+              }
+              
+              console.log(`[Local Cache] Background download completed for ${s3Key} (${(downloadedSize / 1024 / 1024).toFixed(2)}MB)`);
+              this.cleanupCacheIfNeeded();
+            }
           });
 
           response.on('error', (error) => {
-            writeStream.destroy();
-            fs.unlink(localPath, () => {});
-            reject(error);
+            if (!hasResolved) {
+              writeStream.destroy();
+              fsSync.unlink(localPath, () => {});
+              reject(error);
+            } else {
+              console.warn(`[Local Cache] Background download error for ${s3Key}:`, error.message);
+            }
           });
         });
 
         request.on('error', (error) => {
-          writeStream.destroy();
-          fs.unlink(localPath, () => {});
-          reject(error);
+          if (!hasResolved) {
+            writeStream.destroy();
+            fsSync.unlink(localPath, () => {});
+            reject(error);
+          }
         });
 
         request.setTimeout(5 * 60 * 1000, () => {
-          request.destroy();
-          writeStream.destroy();
-          fs.unlink(localPath, () => {});
-          reject(new Error('Download timeout'));
+          if (!hasResolved) {
+            request.destroy();
+            writeStream.destroy();
+            fsSync.unlink(localPath, () => {});
+            reject(new Error('Download timeout'));
+          }
         });
 
       } catch (error) {
         reject(error);
       }
     });
+  }
+
+  async checkSufficientDataForDuration(s3Key, localPath, requiredDuration) {
+    try {
+      // Get video info to calculate if we have enough data
+      const videoInfo = await this.getVideoInfo(s3Key);
+      const videoBitrate = videoInfo.bitrate || videoInfo.video?.bitrate || 5000000; // 5Mbps fallback
+      const totalSize = videoInfo.size;
+      
+      // Check current file size
+      const stats = fsSync.statSync(localPath);
+      const currentSize = stats.size;
+      
+      // Calculate bytes needed for the duration with buffer for encoding overhead
+      const bufferMultiplier = 1.5; // 50% extra buffer
+      const bytesPerSecond = videoBitrate / 8; // Convert bits to bytes
+      const requiredBytes = Math.ceil(requiredDuration * bytesPerSecond * bufferMultiplier);
+      const bytesNeeded = Math.min(requiredBytes, totalSize);
+      
+      const hasEnough = currentSize >= bytesNeeded;
+      
+      console.log(`[Data Check] Video: ${(videoBitrate/1000000).toFixed(1)}Mbps, Current: ${(currentSize/1024/1024).toFixed(1)}MB, needed for ${requiredDuration}s: ${(bytesNeeded/1024/1024).toFixed(1)}MB, sufficient: ${hasEnough}`);
+      
+      return hasEnough;
+    } catch (error) {
+      console.error(`[Data Check] Error checking ${s3Key}:`, error.message);
+      return false;
+    }
   }
 
   cleanupCacheIfNeeded() {
@@ -239,7 +346,7 @@ class VideoService {
           if (totalSize - removedSize <= targetSize) break;
 
           try {
-            fs.unlinkSync(fileInfo.path);
+            fsSync.unlinkSync(fileInfo.path);
             this.localFileCache.delete(s3Key);
             removedSize += fileInfo.size;
             console.log(`[Local Cache] Removed ${s3Key} (${(fileInfo.size / 1024 / 1024).toFixed(2)}MB)`);
@@ -344,45 +451,279 @@ class VideoService {
     return ffmpegProcess.stdout;
   }
 
-  generateHLSSegments(s3Key, segmentDuration = 10) {
-    const signedUrl = s3Service.getSignedUrl(s3Key, 3600);
+  async generateHLSSegments(s3Key, segmentDuration = 10) {
+    try {
+      // Use FFmpeg native live HLS generation
+      const hlsData = await this.generateNativeLiveHLS(s3Key, segmentDuration);
+      return hlsData;
+    } catch (error) {
+      console.error('Error generating native live HLS playlist:', error);
+      throw error;
+    }
+  }
+
+
+
+  async generateNativeLiveHLS(s3Key, segmentDuration = 10) {
+    const cacheKey = `nativehls:${s3Key}:${segmentDuration}`;
+    
+    // Check if native HLS is already being generated
+    if (this.activeProcesses.has(cacheKey)) {
+      return this.activeProcesses.get(cacheKey);
+    }
+    
+    console.log(`[Native Live HLS] Starting FFmpeg native live HLS generation for ${s3Key} with ${segmentDuration}s segments`);
+    
+    const processPromise = this._generateNativeLiveHLSInternal(s3Key, segmentDuration);
+    this.activeProcesses.set(cacheKey, processPromise);
+    
+    try {
+      const result = await processPromise;
+      return result;
+    } finally {
+      this.activeProcesses.delete(cacheKey);
+    }
+  }
+
+  async _generateNativeLiveHLSInternal(s3Key, segmentDuration = 10) {
+    // Get video info for duration calculation
+    const videoInfo = await this.getVideoInfo(s3Key);
+    const hasAudio = videoInfo.audio !== null;
+    
+    console.log(`[Native Live HLS] Video duration: ${videoInfo.duration}s, audio: ${hasAudio}`);
+    
+    // Create temporary directory for HLS output
+    const tempDir = path.join('/tmp/videoreview', 'live-hls', s3Key.replace(/[^a-zA-Z0-9.-]/g, '_'));
+    await fs.mkdir(tempDir, { recursive: true });
+    
+    const playlistPath = path.join(tempDir, 'playlist.m3u8');
+    const segmentPattern = path.join(tempDir, 'segment%03d.ts');
+    
+    // Get input source - request enough data for initial segments (30 seconds worth)
+    let inputSource;
+    if (this.enableLocalCache) {
+      try {
+        const requiredDuration = Math.max(30, segmentDuration * 3); // At least 30s or 3 segments worth
+        const localFilePath = await this.ensureLocalFile(s3Key, requiredDuration);
+        if (localFilePath && fsSync.existsSync(localFilePath)) {
+          inputSource = localFilePath;
+          console.log(`[Native Live HLS] Using local cached file (${requiredDuration}s data): ${localFilePath}`);
+        }
+      } catch (error) {
+        console.log(`[Native Live HLS] Local cache failed, using signed URL:`, error.message);
+      }
+    }
+    
+    if (!inputSource) {
+      inputSource = s3Service.getSignedUrl(s3Key, 3600);
+      console.log(`[Native Live HLS] Using signed URL approach`);
+    }
+    
+    // Build FFmpeg command for native live HLS generation
+    let ffmpegArgs = [];
+    
+    // Input configuration
+    if (hasAudio) {
+      ffmpegArgs.push('-i', inputSource);
+    } else {
+      // Add silent audio for video-only sources
+      ffmpegArgs.push(
+        '-f', 'lavfi',
+        '-i', `anullsrc=channel_layout=stereo:sample_rate=44100`,
+        '-i', inputSource
+      );
+    }
+    
+    // Video encoding with hardware acceleration
+    ffmpegArgs.push('-c:v', this.hwAccel.encoder);
+    
+    // Add quality settings based on encoder type
+    if (this.hwAccel.type === 'videotoolbox') {
+      ffmpegArgs.push(
+        '-q:v', '65',
+        '-realtime', '1',
+        '-allow_sw', '1'
+      );
+    } else if (this.hwAccel.type === 'software') {
+      ffmpegArgs.push(
+        '-preset', 'fast',
+        '-crf', '23'
+      );
+    }
+    
+    // Audio encoding
+    ffmpegArgs.push('-c:a', 'aac', '-b:a', '128k');
+    
+    // Stream mapping
+    if (hasAudio) {
+      ffmpegArgs.push('-map', '0:v:0', '-map', '0:a:0');
+    } else {
+      ffmpegArgs.push('-map', '1:v:0', '-map', '0:a:0');
+    }
+    
+    // Video settings for HLS compatibility
+    ffmpegArgs.push(
+      '-maxrate', '2000k',
+      '-bufsize', '4000k',
+      '-s', '1280x720',
+      '-r', '25',
+      '-pix_fmt', 'yuv420p',
+      '-profile:v', 'high',
+      '-level', '4.0',
+      '-vsync', 'cfr'
+    );
+    
+    // Native Live HLS settings
+    ffmpegArgs.push(
+      '-f', 'hls',
+      '-hls_time', segmentDuration.toString(),
+      '-hls_playlist_type', 'event', // This makes it live/event type
+      '-hls_segment_type', 'mpegts',
+      '-hls_flags', 'split_by_time+independent_segments',
+      '-force_key_frames', `expr:gte(t,n_forced*${segmentDuration})`,
+      '-hls_segment_filename', segmentPattern,
+      playlistPath
+    );
+    
+    console.log(`[Native Live HLS] FFmpeg command: ffmpeg ${ffmpegArgs.join(' ')}`);
     
     return new Promise((resolve, reject) => {
-      const segments = [];
-      let playlistContent = '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:' + segmentDuration + '\n';
+      const ffmpeg = spawn('ffmpeg', ffmpegArgs);
       
-      this.getVideoInfo(s3Key).then(info => {
-        const totalDuration = info.duration;
-        const segmentCount = Math.ceil(totalDuration / segmentDuration);
-        
-        for (let i = 0; i < segmentCount; i++) {
-          const startTime = i * segmentDuration;
-          const actualDuration = Math.min(segmentDuration, totalDuration - startTime);
+      let stderr = '';
+      let isResolved = false;
+      
+      // Set up timeout to resolve early for live streaming
+      const earlyResolveTimeout = setTimeout(() => {
+        if (!isResolved && fsSync.existsSync(playlistPath)) {
+          isResolved = true;
           
-          playlistContent += `#EXTINF:${actualDuration.toFixed(3)},\n`;
-          playlistContent += `/api/video/${encodeURIComponent(s3Key)}/segment/${i}\n`;
+          // Store the temp directory path for segment serving
+          if (!this.nativeHlsCache) {
+            this.nativeHlsCache = new Map();
+          }
+          this.nativeHlsCache.set(s3Key, {
+            tempDir,
+            segmentDuration,
+            timestamp: Date.now(),
+            ffmpegProcess: ffmpeg
+          });
           
-          segments.push({
-            index: i,
-            startTime,
-            duration: actualDuration,
-            url: `/api/video/${encodeURIComponent(s3Key)}/segment/${i}`
+          // Read initial playlist
+          const playlist = fsSync.readFileSync(playlistPath, 'utf8');
+          
+          console.log(`[Native Live HLS] Early resolve with initial segments available`);
+          
+          resolve({
+            playlist,
+            segmentCount: 0, // Will be updated as segments are created
+            duration: videoInfo.duration,
+            isLive: true,
+            tempDir
           });
         }
+      }, 3000); // Resolve after 3 seconds if playlist exists
+      
+      ffmpeg.stderr.on('data', (data) => {
+        stderr += data.toString();        
+      });
+      
+      ffmpeg.on('close', async (code) => {
+        clearTimeout(earlyResolveTimeout);
         
-        playlistContent += '#EXT-X-ENDLIST\n';
+        if (isResolved) {
+          console.log(`[Native Live HLS] FFmpeg process completed with code ${code}`);
+          return;
+        }
         
-        resolve({
-          playlist: playlistContent,
-          segments,
-          totalDuration,
-          segmentDuration
-        });
-      }).catch(reject);
+        if (code !== 0) {
+          console.error(`[Native Live HLS] FFmpeg failed with code ${code}:`, stderr);
+          reject(new Error(`Native Live HLS generation failed: ${stderr}`));
+          return;
+        }
+        
+        try {
+          // Read the final playlist
+          const playlist = await fs.readFile(playlistPath, 'utf8');
+          
+          // Count segments
+          const segmentCount = (playlist.match(/segment\d+\.ts/g) || []).length;
+          
+          console.log(`[Native Live HLS] Generated ${segmentCount} segments successfully`);
+          
+          // Store the temp directory path for segment serving
+          if (!this.nativeHlsCache) {
+            this.nativeHlsCache = new Map();
+          }
+          this.nativeHlsCache.set(s3Key, {
+            tempDir,
+            segmentDuration,
+            timestamp: Date.now()
+          });
+          
+          // Clean up after 1 hour
+          setTimeout(() => {
+            this.cleanupNativeHLSCache(s3Key);
+          }, 60 * 60 * 1000);
+          
+          resolve({
+            playlist,
+            segmentCount,
+            duration: videoInfo.duration,
+            isLive: true,
+            tempDir
+          });
+        } catch (error) {
+          reject(error);
+        }
+      });
+      
+      ffmpeg.on('error', (error) => {
+        clearTimeout(earlyResolveTimeout);
+        console.error(`[Native Live HLS] FFmpeg spawn error:`, error);
+        reject(error);
+      });
     });
   }
 
+  async cleanupNativeHLSCache(s3Key) {
+    if (this.nativeHlsCache && this.nativeHlsCache.has(s3Key)) {
+      const cacheEntry = this.nativeHlsCache.get(s3Key);
+      
+      // Kill FFmpeg process if still running
+      if (cacheEntry.ffmpegProcess && !cacheEntry.ffmpegProcess.killed) {
+        cacheEntry.ffmpegProcess.kill();
+        console.log(`[Native Live HLS] Killed FFmpeg process for ${s3Key}`);
+      }
+      
+      try {
+        await fs.rm(cacheEntry.tempDir, { recursive: true, force: true });
+        console.log(`[Native Live HLS] Cleaned up cache for ${s3Key}`);
+      } catch (error) {
+        console.warn(`[Native Live HLS] Failed to cleanup cache for ${s3Key}:`, error.message);
+      }
+      this.nativeHlsCache.delete(s3Key);
+    }
+  }
+
+
+
+
+
   async streamSegment(s3Key, segmentIndex, segmentDuration = 10) {
+    // First, check if we have FFmpeg-generated native HLS segments
+    if (this.nativeHlsCache && this.nativeHlsCache.has(s3Key)) {
+      const hlsCacheEntry = this.nativeHlsCache.get(s3Key);
+      const segmentPath = path.join(hlsCacheEntry.tempDir, `segment${segmentIndex.toString().padStart(3, '0')}.ts`);
+      
+      if (fsSync.existsSync(segmentPath)) {
+        console.log(`[Segment ${segmentIndex}] Serving native HLS segment from ${segmentPath}`);
+        return require('fs').createReadStream(segmentPath);
+      } else {
+        console.log(`[Segment ${segmentIndex}] Native HLS segment not found: ${segmentPath}`);
+      }
+    }
+    
     const cacheKey = `${s3Key}:${segmentIndex}:${segmentDuration}`;
     
     // Check if segment is already cached (pre-encoded)
@@ -398,21 +739,70 @@ class VideoService {
       return stream;
     }
     
-    // Pre-encode multiple segments ahead based on encoding performance
-    this.preEncodeAheadSegments(s3Key, segmentIndex, segmentDuration);
+    // CRITICAL FIX: Wait for complete encoding before streaming to prevent partial fragments
+    console.log(`[Segment ${segmentIndex}] Encoding segment fully before streaming...`);
+    const startTime = Date.now();
     
-    return this._streamSegmentInternal(s3Key, segmentIndex, segmentDuration);
+    return new Promise((resolve, reject) => {
+      this._streamSegmentInternal(s3Key, segmentIndex, segmentDuration)
+        .then(ffmpegStream => {
+          const chunks = [];
+          
+          ffmpegStream.on('data', chunk => {
+            chunks.push(chunk);
+          });
+          
+          ffmpegStream.on('end', () => {
+            const completeSegment = Buffer.concat(chunks);
+            const encodingTime = Date.now() - startTime;
+            
+            console.log(`[Segment ${segmentIndex}] Complete encoding finished (${completeSegment.length} bytes) in ${encodingTime}ms`);
+            
+            // Cache the complete segment for future requests
+            this.segmentCache.set(cacheKey, {
+              data: completeSegment,
+              cached: Date.now()
+            });
+            
+            // Clean up cache after expiry
+            setTimeout(() => {
+              this.segmentCache.delete(cacheKey);
+            }, this.cacheExpiry);
+            
+            // Start pre-encoding next segments in background (async, non-blocking)
+            setImmediate(() => {
+              this.preEncodeAheadSegments(s3Key, segmentIndex, segmentDuration);
+            });
+            
+            // Create a readable stream from the complete buffer
+            const { Readable } = require('stream');
+            const stream = new Readable();
+            stream.push(completeSegment);
+            stream.push(null);
+            resolve(stream);
+          });
+          
+          ffmpegStream.on('error', err => {
+            console.error(`[Segment ${segmentIndex}] Encoding error:`, err);
+            reject(err);
+          });
+        })
+        .catch(reject);
+    });
   }
 
   async _streamSegmentInternal(s3Key, segmentIndex, segmentDuration = 10) {
     const cacheKey = `${s3Key}:${segmentIndex}:${segmentDuration}`;
+    
+    // Determine if this is an MXF source file (moved to top to avoid temporal dead zone)
+    const isMxfSource = s3Key.toLowerCase().endsWith('.mxf');
     
     // Check if segment is already being processed
     if (this.activeProcesses.has(cacheKey)) {
       return this.activeProcesses.get(cacheKey);
     }
     
-    const startTime = segmentIndex * segmentDuration;
+    let startTime = segmentIndex * segmentDuration;
     
     // Determine input source after getting video info (moved down after videoInfo is available)
     
@@ -446,6 +836,18 @@ class VideoService {
       }
     }
     
+    // Apply frame-accurate timing for precise segment alignment
+    if (videoInfo && videoInfo.video && videoInfo.video.fps) {
+      const fps = videoInfo.video.fps;
+      // Round to nearest frame boundary for perfect segment alignment
+      const frameTime = 1 / fps;
+      startTime = Math.round(startTime / frameTime) * frameTime;
+      
+      console.log(`[Segment ${segmentIndex}] Frame-accurate timing: ${startTime.toFixed(6)}s (fps: ${fps})`);
+    } else {
+      console.log(`[Segment ${segmentIndex}] Using whole-second timing: ${startTime}s (fps info unavailable)`);
+    }
+    
     // Try to use local cached file for better performance, fallback to signed URL
     let inputSource = null;
     let useLocalFile = false;
@@ -453,8 +855,15 @@ class VideoService {
     if (this.enableLocalCache) {
       try {
         console.log(`[Segment ${segmentIndex}] Checking for local cached file...`);
-        const localFilePath = await this.ensureLocalFile(s3Key);
-        if (localFilePath && require('fs').existsSync(localFilePath)) {
+        
+        // Calculate how much data we need for this specific segment
+        // For early segments, we need data up to that segment's end time
+        // For later segments, we might already have enough data from partial downloads
+        const segmentEndTime = (segmentIndex + 1) * segmentDuration;
+        const requiredDuration = segmentEndTime + (segmentDuration * 0.5); // Add 50% buffer
+        
+        const localFilePath = await this.ensureLocalFile(s3Key, requiredDuration, startTime);
+        if (localFilePath && fsSync.existsSync(localFilePath)) {
           inputSource = localFilePath;
           useLocalFile = true;
           console.log(`[Segment ${segmentIndex}] Using local cached file: ${localFilePath}`);
@@ -471,29 +880,28 @@ class VideoService {
       console.log(`[Segment ${segmentIndex}] Using signed URL approach`);
     }
     
-    // Build FFmpeg arguments based on input source
-    const ffmpegArgs = [
-      '-i', inputSource,
-      '-ss', startTime.toString(),
-      '-t', segmentDuration.toString()
-    ];
-    
     // Handle audio configuration for consistent HLS stream structure
+    let ffmpegArgs;
     if (hasAudio) {
-      // Normal video with audio
-      ffmpegArgs.push(
+      // Normal video with audio - apply seeking to video input
+      ffmpegArgs = [
+        '-ss', startTime.toString(),
+        '-i', inputSource,
+        '-t', segmentDuration.toString(),
         '-map', '0:v:0',
         '-map', '0:a:0'
-      );
+      ];
     } else {
-      // Video-only source: add silent audio for HLS consistency
-      ffmpegArgs.push(
+      // Video-only source: add silent audio first, then seek video
+      ffmpegArgs = [
         '-f', 'lavfi',
-        '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
-        '-map', '0:v:0',
-        '-map', '1:a:0',
-        '-shortest'
-      );
+        '-i', `anullsrc=channel_layout=stereo:sample_rate=44100:duration=${segmentDuration}`,
+        '-ss', startTime.toString(),
+        '-i', inputSource,
+        '-t', segmentDuration.toString(),
+        '-map', '1:v:0',
+        '-map', '0:a:0'
+      ];
     }
     
     // Video encoding with hardware acceleration
@@ -514,38 +922,93 @@ class VideoService {
       );
     }
     
-    // Common video settings
+    // GOP and keyframe settings for segment boundary alignment
+    // Calculate GOP size to ensure keyframes align with segment boundaries
+    const targetFrameRate = 25;
+    const gopSize = Math.floor(segmentDuration * targetFrameRate); // One GOP per segment for perfect alignment
+    
     ffmpegArgs.push(
       '-maxrate', '2000k',
       '-bufsize', '4000k',
-      '-g', Math.floor(segmentDuration * 2), // GOP size aligned to segment duration
-      '-keyint_min', Math.floor(segmentDuration * 2),
-      '-sc_threshold', '0',
-      '-force_key_frames', `expr:gte(t,n_forced*${segmentDuration})`,
-      '-r', '25',
+      '-g', gopSize, // GOP size exactly matches segment duration in frames
+      '-keyint_min', gopSize, // Minimum keyframe interval matches GOP
+      '-sc_threshold', '0', // Disable scene change detection to maintain GOP structure
+      '-force_key_frames', `expr:gte(t,n_forced*${segmentDuration})`, // Force keyframes at segment boundaries
+      '-r', targetFrameRate,
       '-s', '1280x720',
       '-pix_fmt', 'yuv420p', // Force 4:2:0 for HLS compatibility
       '-profile:v', 'high',
-      '-level', '4.0'
+      '-level', '4.0',
+      '-vsync', 'cfr', // Constant frame rate for consistent timing
+      '-fps_mode', 'cfr' // Ensure constant frame rate mode
     );
     
-    // Audio encoding (always present now)
+    // Audio encoding with proper timestamp handling for MXF files
+    if (hasAudio) {
+      ffmpegArgs.push(
+        '-c:a', 'aac',
+        '-b:a', '128k',
+        '-ac', '2',
+        '-ar', '44100',
+        '-aac_coder', 'twoloop',
+        '-profile:a', 'aac_low',
+        '-cutoff', '18000'
+      );
+      
+      if (isMxfSource) {
+        // Special audio timestamp handling for MXF files
+        ffmpegArgs.push(
+          '-async', '1', // Audio/video sync
+          '-af', 'aresample=async=1:first_pts=0', // Resample with proper PTS
+          '-shortest' // Ensure audio doesn't extend beyond video
+        );
+      }
+    } else {
+      // Silent audio for videos without audio tracks (already configured as input above)
+      ffmpegArgs.push(
+        '-c:a', 'aac',
+        '-b:a', '64k',
+        '-ac', '2',
+        '-ar', '44100',
+        '-shortest'
+      );
+    }
+    
     ffmpegArgs.push(
-      '-c:a', 'aac',
-      '-b:a', '96k',
-      '-ac', '2',
-      '-ar', '44100'
+      '-max_muxing_queue_size', '1024' // Prevent queue overflow
     );
+    
+    // MPEGTS output with proper segment boundary alignment
     
     ffmpegArgs.push(
       '-bsf:v', 'h264_mp4toannexb',
       '-f', 'mpegts',
-      '-avoid_negative_ts', 'make_zero',
-      '-fflags', '+genpts',
+      '-avoid_negative_ts', 'make_zero'
+    );
+    
+    if (isMxfSource) {
+      // Fixed timestamp handling for MXF files to ensure proper HLS segment timing
+      ffmpegArgs.push(
+        '-fflags', '+genpts+igndts+discardcorrupt', // Generate PTS, ignore DTS, discard corrupt packets
+        '-copytb', '1', // Copy timebase for better alignment
+        '-muxpreload', '0', // No preload delay
+        '-muxdelay', '0', // No mux delay
+        '-avoid_negative_ts', 'make_zero', // Ensure no negative timestamps
+        '-map_metadata', '-1' // Remove metadata that might interfere with timing
+      );
+    } else {
+      ffmpegArgs.push(
+        '-fflags', '+genpts+igndts' // Standard settings for MP4 sources
+      );
+    }
+    
+    ffmpegArgs.push(
       '-muxrate', '2500k',
-      '-pcr_period', '60',
-      '-pat_period', '0.1',
-      '-sdt_period', '0.5',
+      '-pcr_period', '60', // PCR every 60ms for good sync
+      '-pat_period', '0.1', // PAT every 100ms
+      '-sdt_period', '0.5', // SDT every 500ms  
+      '-mpegts_start_pid', '100', // Consistent PID assignment
+      '-mpegts_copyts', '1', // Copy timestamps for better segment alignment
       '-threads', '0',
       'pipe:1'
     );
