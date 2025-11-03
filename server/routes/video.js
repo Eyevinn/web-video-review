@@ -1,7 +1,6 @@
 const express = require('express');
 const router = express.Router();
 const videoService = require('../services/videoService');
-const rangeParser = require('range-parser');
 const path = require('path');
 const fs = require('fs');
 
@@ -97,7 +96,6 @@ router.get('/:key/playlist.m3u8', async (req, res) => {
     const { segmentDuration = 10 } = req.query;
     
     // Check if this is a native HLS request (check for existing native HLS cache)
-    const videoService = require('../services/videoService');
     let playlist;
     
     if (videoService.nativeHlsCache && videoService.nativeHlsCache.has(key)) {
