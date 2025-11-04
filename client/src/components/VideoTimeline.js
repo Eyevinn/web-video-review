@@ -15,8 +15,11 @@ function VideoTimeline({ videoInfo, currentTime, onSeek, videoKey }) {
       const fetchThumbnails = async () => {
         try {
           console.log('Fetching thumbnails for video:', videoKey);
+          console.log('Video duration:', videoInfo.duration, 'seconds');
           const thumbnailData = await api.getThumbnails(videoKey, { segmentDuration: 10 });
           console.log('Received thumbnails:', thumbnailData.length, 'thumbnails');
+          console.log('Expected thumbnails for', videoInfo.duration, 'seconds:', Math.ceil(videoInfo.duration / 10));
+          console.log('First few thumbnail times:', thumbnailData.slice(0, 5).map(t => t.time));
           setThumbnails(thumbnailData);
           
           // If some thumbnails are still missing, set up polling to check for updates
