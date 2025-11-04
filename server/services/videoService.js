@@ -1176,41 +1176,6 @@ class VideoService {
     }
   }
 
-  async generateSegmentThumbnail(s3Key, segmentIndex, segmentDuration, startTime) {
-    const thumbnailKey = `${s3Key}:${segmentIndex}:${segmentDuration}`;
-    
-    // Check if thumbnail already exists in cache
-    if (this.thumbnailCache.has(thumbnailKey)) {
-      return this.thumbnailCache.get(thumbnailKey);
-    }
-    
-    try {
-      const signedUrl = s3Service.getSignedUrl(s3Key, 3600);
-      // Generate thumbnail at the middle of the segment for better representation
-      const thumbnailTime = startTime + (segmentDuration / 2);
-      const thumbnailBase64 = await this.extractThumbnailAtTime(signedUrl, thumbnailTime);
-      
-      const thumbnailData = {
-        segmentIndex,
-        time: thumbnailTime,
-        data: thumbnailBase64,
-        cached: Date.now()
-      };
-      
-      // Cache the thumbnail
-      this.thumbnailCache.set(thumbnailKey, thumbnailData);
-      
-      // Clean up old cache entries
-      setTimeout(() => {
-        this.thumbnailCache.delete(thumbnailKey);
-      }, this.cacheExpiry);
-      
-      return thumbnailData;
-    } catch (error) {
-      console.error(`Error generating thumbnail for segment ${segmentIndex}:`, error);
-      return null;
-    }
-  }
 
   async getSegmentThumbnails(s3Key, segmentDuration = 10) {
     try {
@@ -1245,21 +1210,15 @@ class VideoService {
           }
         }
         
-        // Fallback to cache or placeholder
+        // Fallback to placeholder if native HLS thumbnail not available
         if (!thumbnailData) {
-          const thumbnailKey = `${s3Key}:${i}:${segmentDuration}`;
-          if (this.thumbnailCache.has(thumbnailKey)) {
-            thumbnailData = this.thumbnailCache.get(thumbnailKey);
-          } else {
-            // Return placeholder for segments that haven't been loaded yet
-            thumbnailData = {
-              segmentIndex: i,
-              time: i * segmentDuration + (segmentDuration / 2),
-              data: null,
-              cached: null,
-              source: 'placeholder'
-            };
-          }
+          thumbnailData = {
+            segmentIndex: i,
+            time: i * segmentDuration + (segmentDuration / 2),
+            data: null,
+            cached: null,
+            source: 'placeholder'
+          };
         }
         
         thumbnails.push(thumbnailData);
@@ -1272,61 +1231,6 @@ class VideoService {
     }
   }
 
-  async extractThumbnails(s3Key, count = 10) {
-    try {
-      const info = await this.getVideoInfo(s3Key);
-      const interval = info.duration / count;
-      const signedUrl = s3Service.getSignedUrl(s3Key, 3600);
-      
-      const thumbnails = [];
-      
-      for (let i = 0; i < count; i++) {
-        const time = i * interval;
-        const thumbnail = await this.extractThumbnailAtTime(signedUrl, time);
-        thumbnails.push({
-          time,
-          data: thumbnail
-        });
-      }
-      
-      return thumbnails;
-    } catch (error) {
-      console.error('Error extracting thumbnails:', error);
-      throw error;
-    }
-  }
-
-  extractThumbnailAtTime(signedUrl, time) {
-    return new Promise((resolve, reject) => {
-      const ffmpegArgs = [
-        '-i', signedUrl,
-        '-ss', time.toString(),
-        '-vframes', '1',
-        '-f', 'image2',
-        '-update', '1',
-        '-vcodec', 'png',
-        'pipe:1'
-      ];
-
-      const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
-      const chunks = [];
-
-      ffmpegProcess.stdout.on('data', (chunk) => {
-        chunks.push(chunk);
-      });
-
-      ffmpegProcess.stdout.on('end', () => {
-        const buffer = Buffer.concat(chunks);
-        resolve(buffer.toString('base64'));
-      });
-
-      ffmpegProcess.stderr.on('data', (data) => {
-        console.log(`Thumbnail FFmpeg stderr: ${data}`);
-      });
-
-      ffmpegProcess.on('error', reject);
-    });
-  }
 }
 
 module.exports = new VideoService();
