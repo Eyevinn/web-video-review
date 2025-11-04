@@ -557,36 +557,28 @@ class VideoService {
     const segmentPattern = path.join(tempDir, 'segment%03d.ts');
     const thumbnailPattern = path.join(tempDir, 'thumb%03d.jpg');
     
-    // Get input source - for HLS generation we need the complete file
+    // Get input source - use streaming approach for better performance
     let inputSource;
+    let useStreamingMode = false;
+    
     if (this.enableLocalCache) {
       try {
-        // For full HLS generation, we need the complete file, not just initial segments
-        const localFilePath = await this.ensureLocalFile(s3Key, null); // null = request complete file
+        // Start download but don't wait for completion - use streaming read
+        const requiredDuration = Math.max(60, segmentDuration * 6); // Need enough data to start
+        const localFilePath = await this.ensureLocalFile(s3Key, requiredDuration);
         if (localFilePath && fsSync.existsSync(localFilePath)) {
-          // Check if we have a complete download
           const stats = fsSync.statSync(localFilePath);
           const cacheEntry = this.localFileCache.get(s3Key);
           
           if (cacheEntry && cacheEntry.isPartial === false) {
+            // Complete file available
             inputSource = localFilePath;
             console.log(`[Native Live HLS] Using complete cached file: ${localFilePath} (${(stats.size/1024/1024).toFixed(1)}MB)`);
-          } else if (cacheEntry && cacheEntry.isPartial === true) {
-            console.log(`[Native Live HLS] Cached file is partial (${(stats.size/1024/1024).toFixed(1)}MB), waiting for complete download...`);
-            // Wait a bit for download to complete, then check again
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            const updatedStats = fsSync.statSync(localFilePath);
-            const updatedCacheEntry = this.localFileCache.get(s3Key);
-            
-            if (updatedCacheEntry && updatedCacheEntry.isPartial === false) {
-              inputSource = localFilePath;
-              console.log(`[Native Live HLS] Now using complete cached file: ${localFilePath} (${(updatedStats.size/1024/1024).toFixed(1)}MB)`);
-            } else {
-              console.log(`[Native Live HLS] Download still incomplete, falling back to signed URL`);
-            }
           } else {
+            // Partial file - use streaming mode
             inputSource = localFilePath;
-            console.log(`[Native Live HLS] Using cached file (status unknown): ${localFilePath}`);
+            useStreamingMode = true;
+            console.log(`[Native Live HLS] Using streaming mode with partial file: ${localFilePath} (${(stats.size/1024/1024).toFixed(1)}MB downloading...)`);
           }
         }
       } catch (error) {
@@ -625,7 +617,28 @@ class VideoService {
     // Build FFmpeg command for native live HLS generation
     let ffmpegArgs = [];
     
-    // Input configuration
+    // Input configuration with streaming mode support
+    if (useStreamingMode) {
+      // Add streaming-specific flags for reading from partially downloaded files
+      ffmpegArgs.push(
+        '-fflags', '+genpts+igndts',  // Generate timestamps and ignore input DTS
+        '-avoid_negative_ts', 'make_zero',  // Handle timestamp issues
+        '-thread_queue_size', '512',  // Larger thread queue for streaming
+        '-analyzeduration', '2M',  // Reduce analysis time for faster startup
+        '-probesize', '5M'  // Reduce probe size for faster startup
+      );
+      
+      if (isMxfSource) {
+        // Special handling for MXF streaming - these files need more patience
+        ffmpegArgs.push(
+          '-f', 'mxf',  // Force MXF format detection
+          '-stream_loop', '-1'  // Loop indefinitely until EOF (allows waiting for more data)
+        );
+      }
+      
+      console.log(`[Native Live HLS] Using streaming mode flags for concurrent download/processing`);
+    }
+    
     if (hasAudio) {
       ffmpegArgs.push('-i', inputSource);
     } else {
@@ -664,6 +677,15 @@ class VideoService {
       ffmpegArgs.push('-map', '1:v:0', '-map', '0:a:0');
     }
     
+    // Duration control for streaming mode
+    if (useStreamingMode) {
+      // Use the full expected duration to prevent premature termination
+      if (videoInfo.duration && videoInfo.duration > 0) {
+        ffmpegArgs.push('-t', videoInfo.duration.toString());
+        console.log(`[Native Live HLS] Setting duration limit to ${videoInfo.duration}s for streaming mode`);
+      }
+    }
+    
     // Video settings for HLS compatibility
     ffmpegArgs.push(
       '-maxrate', '2000k',
@@ -680,7 +702,7 @@ class VideoService {
     ffmpegArgs.push(
       '-f', 'hls',
       '-hls_time', segmentDuration.toString(),
-      '-hls_playlist_type', 'event', // This makes it live/event type
+      '-hls_playlist_type', 'event', // Keep as event to allow adding new segments
       '-hls_segment_type', 'mpegts',
       '-hls_flags', 'split_by_time+independent_segments',
       '-force_key_frames', `expr:gte(t,n_forced*${segmentDuration})`,
@@ -992,6 +1014,7 @@ class VideoService {
     // Try to use local cached file for better performance, fallback to signed URL
     let inputSource = null;
     let useLocalFile = false;
+    let useStreamingMode = false;
     
     if (this.enableLocalCache) {
       try {
@@ -1007,7 +1030,15 @@ class VideoService {
         if (localFilePath && fsSync.existsSync(localFilePath)) {
           inputSource = localFilePath;
           useLocalFile = true;
-          console.log(`[Segment ${segmentIndex}] Using local cached file: ${localFilePath}`);
+          
+          // Check if file is complete or partial
+          const cacheEntry = this.localFileCache.get(s3Key);
+          if (cacheEntry && cacheEntry.isPartial === true) {
+            useStreamingMode = true;
+            console.log(`[Segment ${segmentIndex}] Using streaming mode with partial file: ${localFilePath}`);
+          } else {
+            console.log(`[Segment ${segmentIndex}] Using complete cached file: ${localFilePath}`);
+          }
         }
       } catch (error) {
         console.log(`[Segment ${segmentIndex}] Local cache failed, falling back to signed URL:`, error.message);
@@ -1022,19 +1053,37 @@ class VideoService {
     }
     
     // Handle audio configuration for consistent HLS stream structure
-    let ffmpegArgs;
+    let ffmpegArgs = [];
+    
+    // Add streaming-specific flags if using partial file
+    if (useStreamingMode) {
+      ffmpegArgs.push(
+        '-fflags', '+genpts+igndts',
+        '-avoid_negative_ts', 'make_zero',
+        '-thread_queue_size', '512',
+        '-analyzeduration', '1M',
+        '-probesize', '2M'
+      );
+      
+      if (isMxfSource) {
+        ffmpegArgs.push('-f', 'mxf');
+      }
+      
+      console.log(`[Segment ${segmentIndex}] Adding streaming mode flags for partial file processing`);
+    }
+    
     if (hasAudio) {
       // Normal video with audio - apply seeking to video input
-      ffmpegArgs = [
+      ffmpegArgs.push(
         '-ss', startTime.toString(),
         '-i', inputSource,
         '-t', segmentDuration.toString(),
         '-map', '0:v:0',
         '-map', '0:a:0'
-      ];
+      );
     } else {
       // Video-only source: add silent audio first, then seek video
-      ffmpegArgs = [
+      ffmpegArgs.push(
         '-f', 'lavfi',
         '-i', `anullsrc=channel_layout=stereo:sample_rate=44100:duration=${segmentDuration}`,
         '-ss', startTime.toString(),
@@ -1042,7 +1091,7 @@ class VideoService {
         '-t', segmentDuration.toString(),
         '-map', '1:v:0',
         '-map', '0:a:0'
-      ];
+      );
     }
     
     // Video encoding with hardware acceleration

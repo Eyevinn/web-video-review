@@ -41,9 +41,10 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
           nudgeOffset: 0.5, // Larger nudge offset for timing issues
           nudgeMaxRetry: 3, // Fewer retries to prevent stalls
           maxFragLookUpTolerance: 1.0, // More tolerance for fragment lookup
-          liveSyncDurationCount: 1, // Reduce sync requirements
-          liveMaxLatencyDurationCount: 3, // Lower latency requirements
+          liveSyncDurationCount: 1, // Minimum allowed value  
+          liveMaxLatencyDurationCount: 2, // Must be greater than liveSyncDurationCount
           liveDurationInfinity: false,
+          liveBackBufferLength: 0, // Disable live back buffer
           enableSoftwareAES: true,
           manifestLoadingTimeOut: 30000, // Reasonable manifest timeout
           manifestLoadingMaxRetry: 3, // Fewer manifest retries
@@ -61,7 +62,8 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
           abrMaxWithRealBitrate: false, // Disable real bitrate ABR
           maxStarvationDelay: 25, // Extended starvation delay for MXF files
           maxLoadingDelay: 25, // Extended loading delay for MXF files
-          startPosition: 0 // Start from beginning instead of live edge
+          startPosition: 0, // Start from beginning instead of live edge
+          autoStartLoad: false // Prevent auto-seeking to live edge
         });
         
         hlsRef.current = hls;
@@ -72,6 +74,57 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
         
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           console.log('HLS manifest parsed');
+          // Manually start loading from beginning
+          hls.startLoad(0);
+        });
+        
+        let userCurrentTime = 0;
+        let preventSeek = false;
+        
+        hls.on(Hls.Events.LEVEL_LOADING, (event, data) => {
+          // Store current time BEFORE playlist loading starts
+          const video = videoRef.current;
+          if (video && !seeking && video.currentTime > 0) {
+            userCurrentTime = video.currentTime;
+            preventSeek = true;
+            console.log('Level loading, storing position:', userCurrentTime);
+          }
+        });
+        
+        hls.on(Hls.Events.LEVEL_LOADED, (event, data) => {
+          // Keep the prevention active after level loads
+          const video = videoRef.current;
+          if (video && preventSeek) {
+            console.log('Level loaded, maintaining stored position:', userCurrentTime);
+            
+            // Reset flag after a longer delay to ensure the seek is blocked
+            setTimeout(() => {
+              preventSeek = false;
+              console.log('Re-enabling seeks after level update');
+            }, 1000);
+          }
+        });
+        
+        // Prevent unwanted seeking using timeupdate event
+        video.addEventListener('timeupdate', () => {
+          if (preventSeek && userCurrentTime > 0 && !seeking) {
+            const currentTime = video.currentTime;
+            if (Math.abs(currentTime - userCurrentTime) > 5) {
+              console.log('Detected unwanted seek from', userCurrentTime, 'to', currentTime, '- correcting');
+              video.currentTime = userCurrentTime;
+            }
+          }
+        });
+        
+        // Also listen for seeking events
+        video.addEventListener('seeking', () => {
+          if (preventSeek && userCurrentTime > 0 && !seeking) {
+            const targetTime = video.currentTime;
+            if (Math.abs(targetTime - userCurrentTime) > 5) {
+              console.log('Preventing seek from', userCurrentTime, 'to', targetTime);
+              video.currentTime = userCurrentTime;
+            }
+          }
         });
         
         hls.on(Hls.Events.FRAG_LOADING, (event, data) => {
