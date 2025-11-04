@@ -468,21 +468,17 @@ class VideoService {
     const ffmpegArgs = [
       '-i', signedUrl,
       '-ss', startTime.toString(),
-      '-c:v', this.hwAccel.encoder
+      '-c:v', 'libx264'  // Force software encoding for video filters
     ];
 
-    // Add quality settings based on encoder type
-    if (this.hwAccel.type === 'videotoolbox') {
-      ffmpegArgs.push('-q:v', '65', '-realtime', '1');
-    } else if (this.hwAccel.type === 'software') {
-      ffmpegArgs.push('-preset', 'fast', '-crf', '23');
-    }
+    // Use software encoding settings for timecode overlay compatibility
+    ffmpegArgs.push('-preset', 'fast', '-crf', '23');
     
     ffmpegArgs.push(
       '-b:v', '1500k',
       '-maxrate', '1500k',
       '-bufsize', '3M',
-      '-vf', `setpts=PTS-STARTPTS,drawtext=text='%{pts\\:hms\\:${sourceFps}}':fontsize=24:fontcolor=white:box=1:boxcolor=black@0.8:x=w-tw-10:y=h-th-10`,
+      '-vf', `setpts=PTS-STARTPTS,drawtext=text='%{pts\\:hms}':fontsize=24:fontcolor=white:box=1:boxcolor=black@0.8:x=w-tw-10:y=h-th-10`,
       '-r', '25',
       '-s', '1280x720',
       '-c:a', 'aac',
@@ -500,10 +496,11 @@ class VideoService {
       ffmpegArgs.splice(4, 0, '-t', duration.toString());
     }
 
+    console.log(`[Stream Chunk] FFmpeg command: ffmpeg ${ffmpegArgs.join(' ')}`);
     const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
     
     ffmpegProcess.stderr.on('data', (data) => {
-      console.log(`FFmpeg stderr: ${data}`);
+      console.log(`[Stream Chunk] FFmpeg stderr: ${data}`);
     });
 
     return ffmpegProcess.stdout;
@@ -662,32 +659,19 @@ class VideoService {
       );
     }
     
-    // Video encoding with hardware acceleration
-    ffmpegArgs.push('-c:v', this.hwAccel.encoder);
+    // Video encoding - force software for video filters compatibility
+    ffmpegArgs.push('-c:v', 'libx264');
     
-    // Add quality settings based on encoder type
-    if (this.hwAccel.type === 'videotoolbox') {
-      ffmpegArgs.push(
-        '-q:v', '65',
-        '-realtime', '1',
-        '-allow_sw', '1'
-      );
-    } else if (this.hwAccel.type === 'software') {
-      ffmpegArgs.push(
-        '-preset', 'fast',
-        '-crf', '23'
-      );
-    }
+    // Software encoding quality settings for video filter compatibility
+    ffmpegArgs.push(
+      '-preset', 'fast',
+      '-crf', '23'
+    );
     
     // Audio encoding
     ffmpegArgs.push('-c:a', 'aac', '-b:a', '128k');
     
-    // Stream mapping
-    if (hasAudio) {
-      ffmpegArgs.push('-map', '0:v:0', '-map', '0:a:0');
-    } else {
-      ffmpegArgs.push('-map', '1:v:0', '-map', '0:a:0');
-    }
+    // Note: Stream mapping will be done after filter_complex to avoid conflicts
     
     // Duration control for streaming mode
     if (useStreamingMode) {
@@ -698,52 +682,57 @@ class VideoService {
       }
     }
     
-    // Video settings for HLS compatibility with SMPTE timecode overlay
+    // Use filter_complex for multiple outputs with different filters
     const sourceFps = (videoInfo && videoInfo.video && videoInfo.video.fps) ? Math.round(videoInfo.video.fps) : 25;
     console.log(`[Native Live HLS] Using source frame rate ${sourceFps}fps for SMPTE timecode`);
+    
+    const inputLabel = hasAudio ? '0:v:0' : '1:v:0';
+    const videoInputForFilter = hasAudio ? '0:v' : '1:v';
+    const thumbnailOffset = segmentDuration / 2;
+    const maxThumbnails = Math.ceil(videoInfo.duration / segmentDuration);
+    
+    // Complex filter graph: split input, apply different filters to each branch
+    // Use setpts to reset timestamps and basic SMPTE format
+    const filterComplex = [
+      `[${videoInputForFilter}]split=2[v1][v2]`,
+      `[v1]setpts=PTS-STARTPTS,scale=1280:720,drawtext=text='%{pts\\:hms}':fontsize=24:fontcolor=white:box=1:boxcolor=black@0.8:x=w-tw-10:y=h-th-10[hls]`,
+      `[v2]fps=1/${segmentDuration},scale=320:180[thumbs]`
+    ].join(';');
+    
     ffmpegArgs.push(
+      '-filter_complex', filterComplex,
+      '-map', '[hls]',
+      '-map', hasAudio ? '0:a:0' : '0:a:0',
       '-maxrate', '2000k',
       '-bufsize', '4000k',
-      '-vf', `setpts=PTS-STARTPTS,drawtext=text='%{pts\\:hms\\:${sourceFps}}':fontsize=24:fontcolor=white:box=1:boxcolor=black@0.8:x=w-tw-10:y=h-th-10`,
-      '-s', '1280x720',
       '-r', '25',
       '-pix_fmt', 'yuv420p',
       '-profile:v', 'high',
       '-level', '4.0',
-      '-vsync', 'cfr'
-    );
-    
-    // First output: Native Live HLS settings
-    ffmpegArgs.push(
+      '-vsync', 'cfr',
       '-f', 'hls',
       '-hls_time', segmentDuration.toString(),
-      '-hls_playlist_type', 'event', // Keep as event to allow adding new segments
+      '-hls_playlist_type', 'event',
       '-hls_segment_type', 'mpegts',
       '-hls_flags', 'split_by_time+independent_segments',
       '-force_key_frames', `expr:gte(t,n_forced*${segmentDuration})`,
       '-hls_segment_filename', segmentPattern,
-      playlistPath
-    );
-    
-    // Second output: Thumbnail generation
-    // Extract thumbnails from the middle of each segment for better representation
-    const thumbnailOffset = segmentDuration / 2; // Start from middle of first segment
-    const maxThumbnails = Math.ceil(videoInfo.duration / segmentDuration);
-    ffmpegArgs.push(
-      '-map', hasAudio ? '0:v:0' : '1:v:0', // Map video stream for thumbnails
-      '-ss', thumbnailOffset.toString(), // Start from middle of first segment
-      '-vf', `fps=1/${segmentDuration},scale=320:180`, // One thumbnail per segment, scaled down
-      '-frames:v', maxThumbnails.toString(), // Limit to exact number of needed thumbnails
-      '-q:v', '3', // High quality for thumbnails
+      playlistPath,
+      '-map', '[thumbs]',
+      '-ss', thumbnailOffset.toString(),
+      '-frames:v', maxThumbnails.toString(),
+      '-q:v', '3',
       '-f', 'image2',
-      '-y', // Overwrite existing files
+      '-y',
       thumbnailPattern
     );
     
     console.log(`[Native Live HLS] Video duration: ${videoInfo.duration}s, Segment duration: ${segmentDuration}s`);
     console.log(`[Native Live HLS] Expected ${maxThumbnails} thumbnails (Math.ceil(${videoInfo.duration}/${segmentDuration}))`);
-    console.log(`[Native Live HLS] FFmpeg command: ffmpeg ${ffmpegArgs.join(' ')}`);
     console.log(`[Native Live HLS] Thumbnails will be extracted at: ${Array.from({length: maxThumbnails}, (_, i) => `${(thumbnailOffset + i * segmentDuration).toFixed(1)}s`).join(', ')}`);
+    console.log(`[Native Live HLS] Video input for filter: ${videoInputForFilter} (hasAudio: ${hasAudio})`);
+    console.log(`[Native Live HLS] Filter complex: ${filterComplex}`);
+    console.log(`[Native Live HLS] FFmpeg command: ffmpeg ${ffmpegArgs.join(' ')}`);
     
     return new Promise((resolve, reject) => {
       const ffmpeg = spawn('ffmpeg', ffmpegArgs);
@@ -789,6 +778,16 @@ class VideoService {
       
       ffmpeg.stderr.on('data', (data) => {
         stderr += data.toString();
+        
+        // Check for filter errors
+        if (stderr.includes('filter') && (stderr.includes('error') || stderr.includes('Error') || stderr.includes('invalid') || stderr.includes('Invalid'))) {
+          console.error(`[Native Live HLS] Filter error detected: ${data.toString()}`);
+        }
+        
+        // Check for drawtext errors specifically
+        if (stderr.includes('drawtext') && (stderr.includes('error') || stderr.includes('Error'))) {
+          console.error(`[Native Live HLS] Drawtext filter error: ${data.toString()}`);
+        }
         
         // Check for segment and thumbnail creation in stderr output
         const segmentMatch = stderr.match(/Opening.*segment(\d+)\.ts/);
