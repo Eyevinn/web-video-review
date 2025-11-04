@@ -304,6 +304,84 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
     };
   }, [onTimeUpdate]);
 
+  // Add comprehensive keyboard shortcuts for video control
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      // Only handle keys when video player area is focused or no input is focused
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+        return;
+      }
+      
+      switch (e.key) {
+        // Frame stepping
+        case 'ArrowLeft':
+          e.preventDefault();
+          stepBackward();
+          break;
+        case 'ArrowRight':
+          e.preventDefault();
+          stepForward();
+          break;
+        
+        // Alternative frame stepping (common in video editors)
+        case ',':
+        case '<':
+          e.preventDefault();
+          stepBackward();
+          break;
+        case '.':
+        case '>':
+          e.preventDefault();
+          stepForward();
+          break;
+        
+        // Play/Pause controls
+        case ' ':
+          e.preventDefault();
+          togglePlayPause();
+          break;
+        case 'k':
+        case 'K':
+          e.preventDefault();
+          togglePlayPause();
+          break;
+        
+        // Additional useful shortcuts
+        case 'j':
+        case 'J':
+          e.preventDefault();
+          // Skip backward 10 seconds
+          const video = videoRef.current;
+          if (video) {
+            video.currentTime = Math.max(0, video.currentTime - 10);
+          }
+          break;
+        case 'l':
+        case 'L':
+          e.preventDefault();
+          // Skip forward 10 seconds
+          const videoForward = videoRef.current;
+          if (videoForward) {
+            videoForward.currentTime = Math.min(videoForward.duration || 0, videoForward.currentTime + 10);
+          }
+          break;
+        case 'm':
+        case 'M':
+          e.preventDefault();
+          toggleMute();
+          break;
+        
+        default:
+          break;
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [videoInfo]); // Include videoInfo as dependency since stepForward/stepBackward use it
+
   const togglePlayPause = () => {
     const video = videoRef.current;
     if (!video) return;
@@ -339,6 +417,42 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
     
     video.muted = !video.muted;
     setMuted(video.muted);
+  };
+
+  const stepBackward = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    
+    // Calculate frame duration based on video fps
+    const fps = (videoInfo && videoInfo.video && videoInfo.video.fps) ? videoInfo.video.fps : 25;
+    const frameDuration = 1 / fps;
+    
+    // Step back one frame
+    const newTime = Math.max(0, video.currentTime - frameDuration);
+    video.currentTime = newTime;
+    
+    // Ensure video is paused for frame stepping
+    if (!video.paused) {
+      video.pause();
+    }
+  };
+
+  const stepForward = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    
+    // Calculate frame duration based on video fps
+    const fps = (videoInfo && videoInfo.video && videoInfo.video.fps) ? videoInfo.video.fps : 25;
+    const frameDuration = 1 / fps;
+    
+    // Step forward one frame
+    const newTime = Math.min(video.duration || 0, video.currentTime + frameDuration);
+    video.currentTime = newTime;
+    
+    // Ensure video is paused for frame stepping
+    if (!video.paused) {
+      video.pause();
+    }
   };
 
   const formatTime = (time) => {
@@ -392,8 +506,16 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
         backgroundColor: '#2a2a2a',
         borderTop: '1px solid #3a3a3a'
       }}>
+        <button className="btn" onClick={stepBackward} title="Step backward one frame">
+          ⏮️
+        </button>
+        
         <button className="btn" onClick={togglePlayPause} disabled={isBuffering && !isPlaying}>
           {isBuffering && !isPlaying ? '⏳' : (isPlaying ? '⏸️' : '▶️')}
+        </button>
+        
+        <button className="btn" onClick={stepForward} title="Step forward one frame">
+          ⏭️
         </button>
         
         <span style={{ fontSize: '0.9rem', minWidth: '100px' }}>
@@ -415,17 +537,25 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
           />
         </div>
         
-        {videoInfo && (
-          <div style={{ marginLeft: 'auto', fontSize: '0.8rem', color: '#888' }}>
-            {videoInfo.video && (
-              <>
-                {videoInfo.video.width}x{videoInfo.video.height} • 
-                {videoInfo.video.codec} • 
-                {Math.round(videoInfo.video.fps)}fps
-              </>
-            )}
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          {/* Keyboard shortcuts help */}
+          <div style={{ fontSize: '0.7rem', color: '#666', textAlign: 'right' }}>
+            <div>← → , . : Frame step</div>
+            <div>Space, K: Play/Pause • J/L: Skip ±10s • M: Mute</div>
           </div>
-        )}
+          
+          {videoInfo && (
+            <div style={{ fontSize: '0.8rem', color: '#888', borderLeft: '1px solid #444', paddingLeft: '1rem' }}>
+              {videoInfo.video && (
+                <>
+                  {videoInfo.video.width}x{videoInfo.video.height} • 
+                  {videoInfo.video.codec} • 
+                  {Math.round(videoInfo.video.fps)}fps
+                </>
+              )}
+            </div>
+          )}
+        </div>
       </div>
       
       {isBuffering && (

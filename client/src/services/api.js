@@ -10,11 +10,18 @@ class ApiService {
     });
   }
 
-  async getVideos(prefix = '') {
+  async getVideos(prefix = '', filters = {}) {
     try {
-      const response = await this.client.get('/s3/videos', {
-        params: { prefix }
+      const params = { prefix, ...filters };
+      
+      // Remove empty/undefined values
+      Object.keys(params).forEach(key => {
+        if (params[key] === undefined || params[key] === null || params[key] === '') {
+          delete params[key];
+        }
       });
+      
+      const response = await this.client.get('/s3/videos', { params });
       return response.data;
     } catch (error) {
       console.error('Error fetching videos:', error);

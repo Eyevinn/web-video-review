@@ -13,21 +13,46 @@ function App() {
   const [error, setError] = useState(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [seeking, setSeeking] = useState(false);
+  const [currentPath, setCurrentPath] = useState('');
+  const [filters, setFilters] = useState({
+    search: '',
+    fileType: '',
+    minSize: '',
+    maxSize: '',
+    dateFrom: '',
+    dateTo: '',
+    sortBy: 'name',
+    sortOrder: 'asc'
+  });
 
   useEffect(() => {
     loadVideos();
-  }, []);
+  }, [currentPath, filters]);
 
   const loadVideos = async () => {
     try {
       setLoading(true);
-      const videoList = await api.getVideos();
+      const videoList = await api.getVideos(currentPath, filters);
       setVideos(videoList);
     } catch (err) {
       setError('Failed to load videos: ' + err.message);
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleFolderNavigate = (path) => {
+    setCurrentPath(path);
+    setSelectedVideo(null); // Clear selection when navigating
+    setVideoInfo(null);
+    setCurrentTime(0);
+  };
+
+  const handleFiltersChange = (newFilters) => {
+    setFilters(newFilters);
+    setSelectedVideo(null); // Clear selection when filtering
+    setVideoInfo(null);
+    setCurrentTime(0);
   };
 
   const selectVideo = async (video) => {
@@ -90,6 +115,10 @@ function App() {
             selectedVideo={selectedVideo}
             onVideoSelect={selectVideo}
             onRefresh={loadVideos}
+            currentPath={currentPath}
+            onFolderNavigate={handleFolderNavigate}
+            currentFilters={filters}
+            onFiltersChange={handleFiltersChange}
           />
         </div>
         

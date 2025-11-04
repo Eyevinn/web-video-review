@@ -4,8 +4,23 @@ const s3Service = require('../services/s3Service');
 
 router.get('/videos', async (req, res) => {
   try {
-    const { prefix } = req.query;
-    const videos = await s3Service.listVideos(prefix);
+    const { prefix, search, fileType, minSize, maxSize, dateFrom, dateTo, sortBy, sortOrder } = req.query;
+    
+    // Parse numeric values
+    const filters = {
+      search,
+      fileType,
+      minSize: minSize ? parseInt(minSize) : 0,
+      maxSize: maxSize ? parseInt(maxSize) : Number.MAX_SAFE_INTEGER,
+      dateFrom,
+      dateTo,
+      sortBy: sortBy || 'name',
+      sortOrder: sortOrder || 'asc'
+    };
+    
+    console.log(`[S3 Route] Fetching videos with filters:`, { prefix, ...filters });
+    
+    const videos = await s3Service.listVideos(prefix, filters);
     res.json(videos);
   } catch (error) {
     console.error('Error fetching videos:', error);

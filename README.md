@@ -59,6 +59,7 @@ A professional web application for reviewing broadcast video files stored in S3-
    S3_ACCESS_KEY_ID=your-access-key
    S3_SECRET_ACCESS_KEY=your-secret-key
    S3_REGION=us-east-1
+   # AWS_SESSION_TOKEN=your-session-token  # Optional: for temporary credentials/IAM roles
    
    # For MinIO or other S3-compatible storage
    # S3_ENDPOINT=https://your-minio-endpoint.com
@@ -128,6 +129,7 @@ A professional web application for reviewing broadcast video files stored in S3-
 - `S3_ACCESS_KEY_ID` - S3 access key
 - `S3_SECRET_ACCESS_KEY` - S3 secret key
 - `S3_REGION` - S3 region
+- `AWS_SESSION_TOKEN` - Optional: Session token for temporary credentials or IAM roles
 - `PORT` - Server port (default: 3001)
 - `FFMPEG_PATH` - Path to FFmpeg binary
 - `CHUNK_DURATION` - HLS segment duration in seconds
