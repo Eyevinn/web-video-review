@@ -294,6 +294,17 @@ router.get('/:key/thumbnail', async (req, res) => {
   }
 });
 
+router.get('/:key/progress', async (req, res) => {
+  try {
+    const key = decodeURIComponent(req.params.key);
+    const progress = await videoService.getVideoProgress(key);
+    res.json(progress);
+  } catch (error) {
+    console.error('Error getting video progress:', error);
+    res.status(500).json({ error: 'Failed to get video progress' });
+  }
+});
+
 router.get('/:key/seek', async (req, res) => {
   try {
     const key = decodeURIComponent(req.params.key);

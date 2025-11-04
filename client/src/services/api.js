@@ -77,6 +77,16 @@ class ApiService {
     }
   }
 
+  async getVideoProgress(videoKey) {
+    try {
+      const response = await this.client.get(`/video/${encodeURIComponent(videoKey)}/progress`);
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching video progress:', error);
+      throw new Error(error.response?.data?.error || 'Failed to fetch video progress');
+    }
+  }
+
   async getSignedUrl(videoKey, expires = 3600) {
     try {
       const response = await this.client.get(`/s3/video/${encodeURIComponent(videoKey)}/url`, {

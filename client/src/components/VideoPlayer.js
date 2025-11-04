@@ -1,6 +1,7 @@
 import React, { useRef, useEffect, useState } from 'react';
 import Hls from 'hls.js';
 import api from '../services/api';
+import VideoProgressBar from './VideoProgressBar';
 
 function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }) {
   const videoRef = useRef(null);
@@ -13,11 +14,17 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
   const [error, setError] = useState(null);
   const [loadedFragments, setLoadedFragments] = useState(0);
   const [isBuffering, setIsBuffering] = useState(true);
+  const [showProgress, setShowProgress] = useState(true);
+  const [progressReady, setProgressReady] = useState(false);
 
   useEffect(() => {
     if (!videoKey || !videoRef.current) return;
 
     const video = videoRef.current;
+    
+    // Reset progress states for new video
+    setShowProgress(true);
+    setProgressReady(false);
     
     const initializePlayer = () => {
       if (hlsRef.current) {
@@ -27,6 +34,8 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
       // Reset buffering state for new video
       setLoadedFragments(0);
       setIsBuffering(true);
+      
+      // Initialize HLS immediately - this will trigger generation if needed
 
       if (Hls.isSupported()) {
         const hls = new Hls({
@@ -73,7 +82,6 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
         hls.attachMedia(video);
         
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          console.log('HLS manifest parsed');
           // Manually start loading from beginning
           hls.startLoad(0);
         });
@@ -94,14 +102,24 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
         hls.on(Hls.Events.LEVEL_LOADED, (event, data) => {
           // Keep the prevention active after level loads
           const video = videoRef.current;
-          if (video && preventSeek) {
+          if (video && preventSeek && userCurrentTime > 0) {
             console.log('Level loaded, maintaining stored position:', userCurrentTime);
+            
+            // Check if the level loaded is updating the playlist (live edge behavior)
+            if (data.details && data.details.live) {
+              console.log('Live playlist detected, preventing live edge seek');
+              // Immediately restore position if video tried to jump
+              if (Math.abs(video.currentTime - userCurrentTime) > 2) {
+                console.log('Correcting live edge jump from', video.currentTime, 'to', userCurrentTime);
+                video.currentTime = userCurrentTime;
+              }
+            }
             
             // Reset flag after a longer delay to ensure the seek is blocked
             setTimeout(() => {
               preventSeek = false;
               console.log('Re-enabling seeks after level update');
-            }, 1000);
+            }, 1500);
           }
         });
         
@@ -109,7 +127,8 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
         video.addEventListener('timeupdate', () => {
           if (preventSeek && userCurrentTime > 0 && !seeking) {
             const currentTime = video.currentTime;
-            if (Math.abs(currentTime - userCurrentTime) > 5) {
+            // More sensitive detection for playlist updates (2 seconds instead of 5)
+            if (Math.abs(currentTime - userCurrentTime) > 2) {
               console.log('Detected unwanted seek from', userCurrentTime, 'to', currentTime, '- correcting');
               video.currentTime = userCurrentTime;
             }
@@ -120,37 +139,22 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
         video.addEventListener('seeking', () => {
           if (preventSeek && userCurrentTime > 0 && !seeking) {
             const targetTime = video.currentTime;
-            if (Math.abs(targetTime - userCurrentTime) > 5) {
+            // More sensitive detection for playlist updates (2 seconds instead of 5)
+            if (Math.abs(targetTime - userCurrentTime) > 2) {
               console.log('Preventing seek from', userCurrentTime, 'to', targetTime);
               video.currentTime = userCurrentTime;
             }
           }
         });
         
-        hls.on(Hls.Events.FRAG_LOADING, (event, data) => {
-          console.log('Loading fragment:', data.frag.relurl);
-        });
-        
         hls.on(Hls.Events.FRAG_LOADED, (event, data) => {
-          const loadTime = data.stats && data.stats.loading 
-            ? data.stats.loading.end - data.stats.loading.start 
-            : 'unknown';
-          console.log('Fragment loaded:', data.frag.relurl, 'in', loadTime, 'ms');
-          console.log('Fragment details:', {
-            start: data.frag.start,
-            end: data.frag.end,
-            duration: data.frag.duration,
-            sn: data.frag.sn
-          });
           
           // Track loaded fragments and implement buffering strategy for real-time encoding
           setLoadedFragments(prev => {
             const newCount = prev + 1;
-            console.log(`Loaded fragments: ${newCount}`);
             
             // Wait for 3 fragments before allowing playback for real-time encoding
             if (newCount >= 3 && isBuffering) {
-              console.log('Sufficient buffer available for real-time encoding, ready for playback');
               setIsBuffering(false);
             }
             
@@ -158,34 +162,6 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
           });
         });
         
-        // Add buffer state monitoring
-        hls.on(Hls.Events.BUFFER_APPENDED, (event, data) => {
-          console.log('Buffer appended:', {
-            type: data.type,
-            timeRanges: data.timeRanges
-          });
-          
-          // Check for buffer gaps that might cause stalls
-          if (video.buffered.length > 0) {
-            const currentTime = video.currentTime;
-            let hasGap = false;
-            
-            for (let i = 0; i < video.buffered.length - 1; i++) {
-              const gapStart = video.buffered.end(i);
-              const gapEnd = video.buffered.start(i + 1);
-              const gapSize = gapEnd - gapStart;
-              
-              if (gapSize > 0.1 && currentTime >= gapStart - 1 && currentTime <= gapEnd + 1) {
-                console.warn(`Buffer gap detected: ${gapStart.toFixed(2)}s - ${gapEnd.toFixed(2)}s (${gapSize.toFixed(2)}s gap) near currentTime: ${currentTime.toFixed(2)}s`);
-                hasGap = true;
-              }
-            }
-            
-            if (!hasGap) {
-              console.log(`Buffer continuous from ${video.buffered.start(0).toFixed(2)}s to ${video.buffered.end(video.buffered.length - 1).toFixed(2)}s`);
-            }
-          }
-        });
         
         hls.on(Hls.Events.ERROR, (event, data) => {
           console.error('HLS error:', data);
@@ -259,6 +235,7 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
       }
     };
 
+    // Initialize player immediately - this will trigger HLS generation and progress tracking
     initializePlayer();
 
     return () => {
@@ -268,6 +245,11 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
       }
     };
   }, [videoKey]);
+
+  const handleProgressReady = () => {
+    setProgressReady(true);
+    setShowProgress(false);
+  };
 
   useEffect(() => {
     if (!videoRef.current || !seeking) return;
@@ -381,7 +363,7 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
 
   return (
     <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative' }}>
         <video
           ref={videoRef}
           className="video-player"
@@ -392,6 +374,13 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
             backgroundColor: '#000'
           }}
         />
+        
+        {showProgress && (
+          <VideoProgressBar
+            videoKey={videoKey}
+            onReady={handleProgressReady}
+          />
+        )}
       </div>
       
       <div className="video-controls" style={{ 

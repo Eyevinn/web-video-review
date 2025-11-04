@@ -19,6 +19,8 @@ class VideoService {
     this.cacheExpiry = 30 * 60 * 1000; // 30 minutes
     this.activeProcesses = new Map();
     this.encodingTimes = new Map(); // Track encoding performance per video
+    this.nativeHlsCache = new Map(); // Track native HLS generation
+    this.hlsGenerationInProgress = new Set(); // Track which videos are being processed
     
     // Local file caching for source videos
     this.localFileCache = new Map(); // Track downloaded local files
@@ -522,6 +524,9 @@ class VideoService {
       return this.activeProcesses.get(cacheKey);
     }
     
+    // Track HLS generation in progress
+    this.hlsGenerationInProgress.add(s3Key);
+    
     console.log(`[Native Live HLS] Starting FFmpeg native live HLS generation for ${s3Key} with ${segmentDuration}s segments`);
     
     const processPromise = this._generateNativeLiveHLSInternal(s3Key, segmentDuration);
@@ -532,6 +537,7 @@ class VideoService {
       return result;
     } finally {
       this.activeProcesses.delete(cacheKey);
+      this.hlsGenerationInProgress.delete(s3Key);
     }
   }
 
@@ -745,10 +751,15 @@ class VideoService {
           if (!this.nativeHlsCache) {
             this.nativeHlsCache = new Map();
           }
+          if (!this.hlsGenerationInProgress) {
+            this.hlsGenerationInProgress = new Set();
+          }
           this.nativeHlsCache.set(s3Key, {
             tempDir,
             segmentDuration,
             timestamp: Date.now(),
+            createdAt: Date.now(),
+            createdAt: Date.now(),
             ffmpegProcess: ffmpeg
           });
           
@@ -833,10 +844,14 @@ class VideoService {
           if (!this.nativeHlsCache) {
             this.nativeHlsCache = new Map();
           }
+          if (!this.hlsGenerationInProgress) {
+            this.hlsGenerationInProgress = new Set();
+          }
           this.nativeHlsCache.set(s3Key, {
             tempDir,
             segmentDuration,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            createdAt: Date.now()
           });
           
           // Clean up after 1 hour
@@ -1358,14 +1373,14 @@ class VideoService {
       const thumbnails = [];
       
       // Check if we have native HLS cache with thumbnails
-      const hlsCacheEntry = this.nativeHlsCache && this.nativeHlsCache.get(s3Key);
+      const thumbnailsHlsCacheEntry = this.nativeHlsCache && this.nativeHlsCache.get(s3Key);
       
       for (let i = 0; i < segmentCount; i++) {
         let thumbnailData = null;
         
         // First, try to get thumbnail from native HLS generation
-        if (hlsCacheEntry) {
-          const thumbnailPath = path.join(hlsCacheEntry.tempDir, `thumb${i.toString().padStart(3, '0')}.jpg`);
+        if (thumbnailsHlsCacheEntry) {
+          const thumbnailPath = path.join(thumbnailsHlsCacheEntry.tempDir, `thumb${i.toString().padStart(3, '0')}.jpg`);
           if (fsSync.existsSync(thumbnailPath)) {
             try {
               const thumbnailBuffer = fsSync.readFileSync(thumbnailPath);
@@ -1402,6 +1417,132 @@ class VideoService {
     } catch (error) {
       console.error('Error getting segment thumbnails:', error);
       throw error;
+    }
+  }
+
+  async getVideoProgress(s3Key) {
+    try {
+      let downloadProgress = 0;
+      let processingProgress = 0;
+      let estimatedTimeRemaining = null;
+      let status = 'initializing';
+      let message = 'Preparing video...';
+
+      // Progress endpoint is now read-only - HLS generation is triggered by playlist requests
+
+      // Check download progress
+      const cacheEntry = this.localFileCache.get(s3Key);
+      if (cacheEntry) {
+        // Try to get video info to determine total size if not available in cache
+        let totalSize = cacheEntry.totalSize;
+        if (!totalSize) {
+          try {
+            const videoInfo = await this.getVideoInfo(s3Key);
+            totalSize = videoInfo.size;
+          } catch (error) {
+            console.warn('Could not get video size for download progress:', error.message);
+          }
+        }
+        
+        if (cacheEntry.isPartial === false) {
+          downloadProgress = 100;
+          status = 'downloaded';
+          message = 'Download complete';
+        } else if (cacheEntry.size && totalSize) {
+          downloadProgress = Math.round((cacheEntry.size / totalSize) * 100);
+          status = 'downloading';
+          message = `Downloading... ${downloadProgress}%`;
+          
+          
+          // Estimate remaining time based on download speed
+          if (cacheEntry.downloadTime) {
+            const elapsed = Date.now() - cacheEntry.downloadTime.getTime();
+            if (elapsed > 0) {
+              const bytesPerMs = cacheEntry.size / elapsed;
+              const remainingBytes = totalSize - cacheEntry.size;
+              const estimatedMs = remainingBytes / bytesPerMs;
+              estimatedTimeRemaining = Math.ceil(estimatedMs / 1000);
+            }
+          }
+        }
+      }
+
+      // Check if generation is in progress but no cache entry yet
+      if (this.hlsGenerationInProgress && this.hlsGenerationInProgress.has(s3Key) && 
+          this.nativeHlsCache && !this.nativeHlsCache.get(s3Key)) {
+        status = 'starting';
+        message = 'Starting video processing...';
+      }
+
+      // Check processing progress (HLS generation)
+      const updatedHlsCacheEntry = this.nativeHlsCache && this.nativeHlsCache.get(s3Key);
+      if (updatedHlsCacheEntry) {
+        try {
+          const videoInfo = await this.getVideoInfo(s3Key);
+          const expectedSegments = Math.ceil(videoInfo.duration / 10); // Assuming 10s segments
+          
+          // Count existing segments
+          let existingSegments = 0;
+          for (let i = 0; i < expectedSegments; i++) {
+            const segmentPath = path.join(updatedHlsCacheEntry.tempDir, `segment${i.toString().padStart(3, '0')}.ts`);
+            if (fsSync.existsSync(segmentPath)) {
+              existingSegments++;
+            }
+          }
+          
+          processingProgress = Math.round((existingSegments / expectedSegments) * 100);
+          
+          if (existingSegments >= 3) {
+            status = 'ready';
+            message = 'Ready to play';
+          } else if (existingSegments > 0) {
+            status = 'processing';
+            message = `Processing segments... ${existingSegments}/${expectedSegments}`;
+            
+            // Estimate processing time remaining
+            if (!estimatedTimeRemaining && existingSegments > 0) {
+              const segmentsPerSecond = existingSegments / ((Date.now() - updatedHlsCacheEntry.createdAt) / 1000);
+              const remainingSegments = Math.max(3 - existingSegments, 0); // Need at least 3 to start
+              estimatedTimeRemaining = Math.ceil(remainingSegments / segmentsPerSecond);
+            }
+          }
+        } catch (error) {
+          console.warn('Error calculating processing progress:', error);
+        }
+      }
+
+      // Overall progress calculation
+      let overallProgress = 0;
+      if (status === 'ready') {
+        overallProgress = 100;
+      } else if (status === 'processing') {
+        overallProgress = Math.round(50 + (processingProgress * 0.5)); // 50% for download + 50% for processing
+      } else if (status === 'downloading') {
+        overallProgress = Math.round(downloadProgress * 0.5); // First 50% is download
+      }
+
+      const result = {
+        status,
+        message,
+        downloadProgress,
+        processingProgress,
+        overallProgress,
+        estimatedTimeRemaining,
+        ready: status === 'ready'
+      };
+      
+      return result;
+    } catch (error) {
+      console.error('Error getting video progress:', error);
+      return {
+        status: 'error',
+        message: 'Error checking progress',
+        downloadProgress: 0,
+        processingProgress: 0,
+        overallProgress: 0,
+        estimatedTimeRemaining: null,
+        ready: false
+      };
     }
   }
 
