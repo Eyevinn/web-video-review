@@ -19,8 +19,6 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
   const [activeAudioTrack, setActiveAudioTrack] = useState(null);
   const [availableAudioTracks, setAvailableAudioTracks] = useState([]);
   
-  // Goniometer state
-  const [showGoniometer, setShowGoniometer] = useState(false);
 
   const switchAudioTrack = useCallback((trackIndex) => {
     const video = videoRef.current;
@@ -204,9 +202,9 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
         
         hlsRef.current = hls;
         
-        // Get playlist URL and load
-        const playlistUrl = api.getHLSPlaylistUrl(videoKey, 10, { goniometer: showGoniometer });
-        console.log(`[VideoPlayer] Loading HLS playlist: ${playlistUrl}${showGoniometer ? ' (with goniometer)' : ''}`);
+        // Get playlist URL and load (always with goniometer)
+        const playlistUrl = api.getHLSPlaylistUrl(videoKey, 10, { goniometer: true });
+        console.log(`[VideoPlayer] Loading HLS playlist: ${playlistUrl} (with goniometer)`);
         hls.loadSource(playlistUrl);
         hls.attachMedia(video);
         
@@ -368,9 +366,9 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
         });
         
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Native HLS support
-        const playlistUrl = api.getHLSPlaylistUrl(videoKey);
-        console.log(`[VideoPlayer] Loading native HLS: ${playlistUrl}`);
+        // Native HLS support (always with goniometer)
+        const playlistUrl = api.getHLSPlaylistUrl(videoKey, 10, { goniometer: true });
+        console.log(`[VideoPlayer] Loading native HLS: ${playlistUrl} (with goniometer)`);
         video.src = playlistUrl;
         
         // Detect audio tracks after video loads
@@ -393,7 +391,7 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
         hlsRef.current = null;
       }
     };
-  }, [videoKey, showGoniometer]);
+  }, [videoKey]);
 
   // Expose switchAudioTrack function to parent component
   useEffect(() => {
@@ -717,18 +715,6 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
           </div>
         )}
         
-        {/* Goniometer toggle */}
-        <button 
-          className="btn" 
-          onClick={() => setShowGoniometer(!showGoniometer)}
-          title="Toggle Audio Goniometer"
-          style={{
-            backgroundColor: showGoniometer ? '#2a4d3a' : 'transparent',
-            border: showGoniometer ? '1px solid #4ade80' : '1px solid #555'
-          }}
-        >
-          🎯
-        </button>
         
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '1rem' }}>
           {/* Keyboard shortcuts help */}

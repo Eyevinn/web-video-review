@@ -541,7 +541,7 @@ class VideoService {
 
 
   async generateNativeLiveHLS(s3Key, segmentDuration = 10, options = {}) {
-    const { showGoniometer = false } = options;
+    const { showGoniometer = true } = options;
     const cacheKey = `nativehls:${s3Key}:${segmentDuration}:${showGoniometer ? 'gonio' : 'normal'}`;
     
     // Check if native HLS is already being generated
@@ -567,7 +567,7 @@ class VideoService {
   }
 
   async _generateNativeLiveHLSInternal(s3Key, segmentDuration = 10, options = {}) {
-    const { showGoniometer = false } = options;
+    const { showGoniometer = true } = options;
     // Get video info for duration calculation
     const videoInfo = await this.getVideoInfo(s3Key);
     const hasAudio = videoInfo.audio !== null;

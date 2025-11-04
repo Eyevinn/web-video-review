@@ -99,7 +99,7 @@ router.get('/:key/stream', async (req, res) => {
 router.get('/:key/playlist.m3u8', async (req, res) => {
   try {
     const key = decodeURIComponent(req.params.key);
-    const { segmentDuration = 10, goniometer = false } = req.query;
+    const { segmentDuration = 10, goniometer = 'true' } = req.query;
     const showGoniometer = goniometer === 'true' || goniometer === '1';
     
     // Check if we have existing HLS cache

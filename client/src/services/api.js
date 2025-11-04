@@ -67,7 +67,9 @@ class ApiService {
   getHLSPlaylistUrl(videoKey, segmentDuration = 10, options = {}) {
     const params = new URLSearchParams({ segmentDuration });
     
-    if (options.goniometer) {
+    // Always enable goniometer by default, unless explicitly disabled
+    const enableGoniometer = options.goniometer !== false;
+    if (enableGoniometer) {
       params.append('goniometer', 'true');
     }
     
