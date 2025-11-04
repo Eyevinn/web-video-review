@@ -45,8 +45,14 @@ async function waitForInitialSegments(tempDir, minSegments = 2, timeoutMs = 3000
 router.get('/:key/info', async (req, res) => {
   try {
     const key = decodeURIComponent(req.params.key);
-    const info = await videoService.getVideoInfo(key);
-    res.json(info);
+    
+    // Abort any existing FFmpeg processes and load new video
+    await videoService.loadNewVideo(key);
+    
+    // Get video info
+    const videoInfo = await videoService.getVideoInfo(key);
+    
+    res.json(videoInfo);
   } catch (error) {
     console.error('Error getting video info:', error);
     
@@ -95,31 +101,40 @@ router.get('/:key/playlist.m3u8', async (req, res) => {
     const key = decodeURIComponent(req.params.key);
     const { segmentDuration = 10 } = req.query;
     
-    // Check if this is a native HLS request (check for existing native HLS cache)
+    // Check if we have existing HLS cache
     let playlist;
+    let cacheEntry = null;
     
     if (videoService.nativeHlsCache && videoService.nativeHlsCache.has(key)) {
-      // Return updated native HLS playlist
-      const cacheEntry = videoService.nativeHlsCache.get(key);
+      cacheEntry = videoService.nativeHlsCache.get(key);
       const playlistPath = path.join(cacheEntry.tempDir, 'playlist.m3u8');
       
       if (require('fs').existsSync(playlistPath)) {
+        // Wait for at least 2 segments before serving the playlist
+        await waitForInitialSegments(cacheEntry.tempDir, 2, 30000);
+        
+        // Read the updated playlist after waiting for segments
         playlist = require('fs').readFileSync(playlistPath, 'utf8');
-        console.log(`[Native HLS] Serving updated playlist for ${key} from ${playlistPath}`);
-      } else {
-        // Generate new HLS data if playlist doesn't exist
-        const hlsData = await videoService.generateHLSSegments(key, parseInt(segmentDuration));
-        playlist = hlsData.playlist;
+        console.log(`Serving updated playlist for ${key} from ${playlistPath}`);
       }
-    } else {
+    }
+    
+    if (!playlist) {
       // Generate initial HLS data and wait for initial segments
       const hlsData = await videoService.generateHLSSegments(key, parseInt(segmentDuration));
       playlist = hlsData.playlist;
       
       // Wait for initial segments to be created before returning playlist
-      const cacheEntry = videoService.nativeHlsCache && videoService.nativeHlsCache.get(key);
-      if (cacheEntry) {
-        await waitForInitialSegments(cacheEntry.tempDir, 2, 30000); // Wait for 2 segments, max 30 seconds
+      const newCacheEntry = videoService.nativeHlsCache && videoService.nativeHlsCache.get(key);
+      if (newCacheEntry) {
+        await waitForInitialSegments(newCacheEntry.tempDir, 2, 30000); // Wait for 2 segments, max 30 seconds
+        
+        // Read the updated playlist after segments are available
+        const playlistPath = path.join(newCacheEntry.tempDir, 'playlist.m3u8');
+        if (require('fs').existsSync(playlistPath)) {
+          playlist = require('fs').readFileSync(playlistPath, 'utf8');
+          console.log(`Serving initial playlist for ${key} with segments available`);
+        }
       }
     }
     
@@ -140,7 +155,6 @@ router.get('/:key/segment:segmentFile', async (req, res) => {
   try {
     const key = decodeURIComponent(req.params.key);
     const segmentFile = req.params.segmentFile; // e.g., "000.ts"
-    
     // Extract segment index from filename (e.g., "000.ts" -> 0)
     const match = segmentFile.match(/(\d+)\.ts$/);
     if (!match) {
@@ -328,6 +342,38 @@ router.get('/:key/seek', async (req, res) => {
   } catch (error) {
     console.error('Error seeking video:', error);
     res.status(500).json({ error: 'Failed to seek video' });
+  }
+});
+
+// Global abort endpoint for troubleshooting
+router.post('/abort-all', async (req, res) => {
+  try {
+    const abortedCount = videoService.abortAllFFmpegProcesses();
+    res.json({ 
+      message: 'All FFmpeg processes aborted',
+      abortedCount,
+      success: true
+    });
+  } catch (error) {
+    console.error('Error aborting FFmpeg processes:', error);
+    res.status(500).json({ error: 'Failed to abort FFmpeg processes' });
+  }
+});
+
+// Video-specific abort endpoint
+router.post('/:key/abort', async (req, res) => {
+  try {
+    const key = decodeURIComponent(req.params.key);
+    const abortedCount = videoService.abortAllFFmpegProcesses(key);
+    res.json({ 
+      message: `FFmpeg processes aborted for ${key}`,
+      abortedCount,
+      videoKey: key,
+      success: true
+    });
+  } catch (error) {
+    console.error('Error aborting FFmpeg processes for video:', error);
+    res.status(500).json({ error: 'Failed to abort FFmpeg processes for video' });
   }
 });
 

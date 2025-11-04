@@ -31,7 +31,9 @@ class ApiService {
 
   async getVideoInfo(videoKey) {
     try {
-      const response = await this.client.get(`/video/${encodeURIComponent(videoKey)}/info`);
+      const response = await this.client.get(`/video/${encodeURIComponent(videoKey)}/info`, {
+        timeout: 120000
+      });
       return response.data;
     } catch (error) {
       console.error('Error fetching video info:', error);
@@ -107,4 +109,5 @@ class ApiService {
   }
 }
 
+// eslint-disable-next-line import/no-anonymous-default-export
 export default new ApiService();

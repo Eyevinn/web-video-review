@@ -78,7 +78,9 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
         
         hlsRef.current = hls;
         
+        // Get playlist URL and load
         const playlistUrl = api.getHLSPlaylistUrl(videoKey);
+        console.log(`[VideoPlayer] Loading HLS playlist: ${playlistUrl}`);
         hls.loadSource(playlistUrl);
         hls.attachMedia(video);
         
@@ -228,7 +230,9 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking }
         });
         
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        // Native HLS support
         const playlistUrl = api.getHLSPlaylistUrl(videoKey);
+        console.log(`[VideoPlayer] Loading native HLS: ${playlistUrl}`);
         video.src = playlistUrl;
       } else {
         const streamUrl = api.getVideoStreamUrl(videoKey);

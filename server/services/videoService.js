@@ -21,6 +21,7 @@ class VideoService {
     this.encodingTimes = new Map(); // Track encoding performance per video
     this.nativeHlsCache = new Map(); // Track native HLS generation
     this.hlsGenerationInProgress = new Set(); // Track which videos are being processed
+    this.currentlyLoadedVideo = null; // Track the currently loaded video to abort previous processes
     
     // Local file caching for source videos
     this.localFileCache = new Map(); // Track downloaded local files
@@ -530,7 +531,7 @@ class VideoService {
     // Track HLS generation in progress
     this.hlsGenerationInProgress.add(s3Key);
     
-    console.log(`[Native Live HLS] Starting FFmpeg native live HLS generation for ${s3Key} with ${segmentDuration}s segments`);
+    console.log(`Starting FFmpeg native live HLS generation for ${s3Key} with ${segmentDuration}s segments`);
     
     const processPromise = this._generateNativeLiveHLSInternal(s3Key, segmentDuration);
     this.activeProcesses.set(cacheKey, processPromise);
@@ -558,9 +559,24 @@ class VideoService {
       console.log(`[Native Live HLS] Processing MXF file with special handling for duration and timing`);
     }
     
-    // Create temporary directory for HLS output
-    const tempDir = path.join('/tmp/videoreview', 'live-hls', s3Key.replace(/[^a-zA-Z0-9.-]/g, '_'));
+    // Create temporary directory for HLS output with better path sanitization
+    const sanitizedKey = s3Key.replace(/[^a-zA-Z0-9._-]/g, '_').replace(/_{2,}/g, '_');
+    const tempDir = path.join('/tmp/videoreview', 'live-hls', sanitizedKey);
+    
+    // Ensure base directory exists first
+    const baseDir = path.join('/tmp/videoreview', 'live-hls');
+    await fs.mkdir(baseDir, { recursive: true });
+    
+    // Clean up any existing directory for this video to start fresh
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    } catch (error) {
+      // Ignore errors if directory doesn't exist
+    }
+    
+    // Create the specific temp directory
     await fs.mkdir(tempDir, { recursive: true });
+    console.log(`[Native Live HLS] Created temp directory: ${tempDir}`);
     
     const playlistPath = path.join(tempDir, 'playlist.m3u8');
     const segmentPattern = path.join(tempDir, 'segment%03d.ts');
@@ -757,7 +773,6 @@ class VideoService {
             segmentDuration,
             timestamp: Date.now(),
             createdAt: Date.now(),
-            createdAt: Date.now(),
             ffmpegProcess: ffmpeg
           });
           
@@ -787,6 +802,22 @@ class VideoService {
         // Check for drawtext errors specifically
         if (stderr.includes('drawtext') && (stderr.includes('error') || stderr.includes('Error'))) {
           console.error(`[Native Live HLS] Drawtext filter error: ${data.toString()}`);
+        }
+        
+        // Check for directory/file access errors and try to recreate directory
+        if (stderr.includes('No such file or directory') || stderr.includes('Failed to open file')) {
+          console.warn(`[Native Live HLS] Directory/file access error detected: ${data.toString()}`);
+          
+          // Try to recreate the temp directory if it was deleted
+          const fsSync = require('fs');
+          if (!fsSync.existsSync(tempDir)) {
+            try {
+              fsSync.mkdirSync(tempDir, { recursive: true });
+              console.log(`[Native Live HLS] Recreated missing temp directory: ${tempDir}`);
+            } catch (error) {
+              console.error(`[Native Live HLS] Failed to recreate temp directory: ${error.message}`);
+            }
+          }
         }
         
         // Check for segment and thumbnail creation in stderr output
@@ -905,6 +936,138 @@ class VideoService {
       }
       this.nativeHlsCache.delete(s3Key);
     }
+  }
+
+  abortAllFFmpegProcesses(s3Key = null) {
+    console.log(`[FFmpeg Abort] ${s3Key ? `Aborting all FFmpeg processes for ${s3Key}` : 'Aborting all FFmpeg processes'}`);
+    
+    let abortedCount = 0;
+    
+    // Abort active processes
+    if (this.activeProcesses) {
+      const processesToAbort = [];
+      for (const [cacheKey, processPromise] of this.activeProcesses.entries()) {
+        if (!s3Key || cacheKey.includes(s3Key)) {
+          processesToAbort.push(cacheKey);
+        }
+      }
+      
+      for (const cacheKey of processesToAbort) {
+        try {
+          this.activeProcesses.delete(cacheKey);
+          abortedCount++;
+          console.log(`[FFmpeg Abort] Removed active process: ${cacheKey}`);
+        } catch (error) {
+          console.warn(`[FFmpeg Abort] Error removing active process ${cacheKey}:`, error.message);
+        }
+      }
+    }
+    
+    // Abort HLS generation processes and clean up cache
+    if (this.nativeHlsCache) {
+      const hlsKeysToAbort = [];
+      for (const [hlsKey, cacheEntry] of this.nativeHlsCache.entries()) {
+        if (!s3Key || hlsKey === s3Key) {
+          hlsKeysToAbort.push(hlsKey);
+        }
+      }
+      
+      for (const hlsKey of hlsKeysToAbort) {
+        try {
+          const cacheEntry = this.nativeHlsCache.get(hlsKey);
+          if (cacheEntry && cacheEntry.ffmpegProcess && !cacheEntry.ffmpegProcess.killed) {
+            cacheEntry.ffmpegProcess.kill('SIGTERM');
+            abortedCount++;
+            console.log(`[FFmpeg Abort] Killed HLS FFmpeg process for ${hlsKey}`);
+            
+            // Force kill after 2 seconds if still running
+            setTimeout(() => {
+              if (!cacheEntry.ffmpegProcess.killed) {
+                cacheEntry.ffmpegProcess.kill('SIGKILL');
+                console.log(`[FFmpeg Abort] Force killed stubborn FFmpeg process for ${hlsKey}`);
+              }
+            }, 2000);
+          }
+          
+          // Mark temp directory for cleanup but don't delete immediately
+          if (cacheEntry && cacheEntry.tempDir) {
+            // Give FFmpeg more time to gracefully shut down before cleaning up
+            setTimeout(async () => {
+              try {
+                // Double-check that the process is really dead before cleanup
+                if (cacheEntry.ffmpegProcess && cacheEntry.ffmpegProcess.killed) {
+                  await fs.rm(cacheEntry.tempDir, { recursive: true, force: true });
+                  console.log(`[FFmpeg Abort] Cleaned up temp directory for ${hlsKey}`);
+                } else {
+                  console.log(`[FFmpeg Abort] Skipping temp directory cleanup - process may still be running for ${hlsKey}`);
+                }
+              } catch (error) {
+                console.warn(`[FFmpeg Abort] Failed to cleanup temp directory for ${hlsKey}:`, error.message);
+              }
+            }, 5000); // Wait 5 seconds before cleanup to allow process to die gracefully
+          }
+          
+          this.nativeHlsCache.delete(hlsKey);
+        } catch (error) {
+          console.warn(`[FFmpeg Abort] Error aborting HLS process for ${hlsKey}:`, error.message);
+        }
+      }
+    }
+    
+    // Remove from HLS generation tracking
+    if (this.hlsGenerationInProgress) {
+      if (s3Key) {
+        this.hlsGenerationInProgress.delete(s3Key);
+      } else {
+        this.hlsGenerationInProgress.clear();
+      }
+    }
+    
+    // Kill any remaining FFmpeg processes using system kill
+    if (!s3Key) {
+      try {
+        const { spawn } = require('child_process');
+        const killProcess = spawn('pkill', ['-f', 'ffmpeg.*videoreview']);
+        killProcess.on('close', (code) => {
+          if (code === 0) {
+            console.log(`[FFmpeg Abort] Killed system FFmpeg processes related to videoreview`);
+          }
+        });
+      } catch (error) {
+        console.warn(`[FFmpeg Abort] Could not kill system FFmpeg processes:`, error.message);
+      }
+    }
+    
+    console.log(`[FFmpeg Abort] Completed - ${abortedCount} processes aborted${s3Key ? ` for ${s3Key}` : ''}`);
+    return abortedCount;
+  }
+
+
+  async loadNewVideo(s3Key) {
+    // Check if this is a different video than currently loaded
+    if (this.currentlyLoadedVideo && this.currentlyLoadedVideo !== s3Key) {
+      console.log(`Switching from ${this.currentlyLoadedVideo} to ${s3Key} - aborting all FFmpeg processes`);
+      
+      // Abort all FFmpeg processes when switching videos
+      this.abortAllFFmpegProcesses();
+      
+      // Clear any downloads for the previous video
+      if (this.activeDownloads && this.activeDownloads.has(this.currentlyLoadedVideo)) {
+        try {
+          this.activeDownloads.delete(this.currentlyLoadedVideo);
+          console.log(`Cancelled download for ${this.currentlyLoadedVideo}`);
+        } catch (error) {
+          console.warn(`Error cancelling download:`, error.message);
+        }
+      }
+    } else if (this.currentlyLoadedVideo === s3Key) {
+      console.log(`Same video ${s3Key} - keeping existing processes`);
+    } else {
+      console.log(`Loading first video ${s3Key}`);
+    }
+    
+    // Update currently loaded video
+    this.currentlyLoadedVideo = s3Key;
   }
 
 
