@@ -1,8 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
 import api from '../services/api';
+import WaveformDisplay from './WaveformDisplay';
 
 function VideoTimeline({ videoInfo, currentTime, onSeek, videoKey }) {
   const [thumbnails, setThumbnails] = useState([]);
+  const [waveform, setWaveform] = useState(null);
+  const [waveformLoading, setWaveformLoading] = useState(false);
   const [seekTime, setSeekTime] = useState('');
   const [isDragging, setIsDragging] = useState(false);
   const [hoverTime, setHoverTime] = useState(null);
@@ -70,6 +73,24 @@ function VideoTimeline({ videoInfo, currentTime, onSeek, videoKey }) {
       };
 
       fetchThumbnails();
+      
+      // Fetch waveform data
+      const fetchWaveform = async () => {
+        try {
+          setWaveformLoading(true);
+          console.log('Fetching waveform for video:', videoKey);
+          const waveformData = await api.getWaveform(videoKey, 10, 1000); // 1000 samples for good resolution
+          console.log('Received waveform:', waveformData);
+          setWaveform(waveformData);
+        } catch (error) {
+          console.warn('Failed to fetch waveform:', error);
+          setWaveform(null);
+        } finally {
+          setWaveformLoading(false);
+        }
+      };
+      
+      fetchWaveform();
     }
   }, [videoKey, videoInfo]);
 
@@ -277,6 +298,36 @@ function VideoTimeline({ videoInfo, currentTime, onSeek, videoKey }) {
         )}
       </div>
       
+      {/* Audio Waveform Display */}
+      <div style={{ 
+        marginTop: '0.5rem',
+        borderRadius: '4px',
+        overflow: 'hidden',
+        backgroundColor: '#2a2a2a'
+      }}>
+        {waveformLoading ? (
+          <div style={{
+            height: '40px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: '#666',
+            fontSize: '0.9rem'
+          }}>
+            Loading waveform...
+          </div>
+        ) : (
+          <WaveformDisplay
+            waveformData={waveform}
+            width={timelineRef.current ? timelineRef.current.offsetWidth : 800}
+            height={40}
+            currentTime={currentTime}
+            duration={videoInfo?.duration || 0}
+            onSeek={onSeek}
+          />
+        )}
+      </div>
+      
       <div style={{
         display: 'flex',
         justifyContent: 'space-between',
@@ -286,7 +337,7 @@ function VideoTimeline({ videoInfo, currentTime, onSeek, videoKey }) {
         color: '#888'
       }}>
         <span>{formatTime(currentTime)}</span>
-        <span>Click timeline to seek • {thumbnails.some(t => t.data) ? 'Thumbnails loaded' : 'Loading thumbnails...'}</span>
+        <span>Click timeline/waveform to seek • {thumbnails.some(t => t.data) ? 'Thumbnails loaded' : 'Loading thumbnails...'} • {waveform?.hasAudio ? 'Waveform loaded' : waveformLoading ? 'Loading waveform...' : 'No audio'}</span>
         <span>{formatTime(videoInfo.duration)}</span>
       </div>
     </div>

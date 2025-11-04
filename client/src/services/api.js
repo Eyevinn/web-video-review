@@ -86,6 +86,19 @@ class ApiService {
     }
   }
 
+  async getWaveform(videoKey, segmentDuration = 10, samples = 1000) {
+    try {
+      const response = await this.client.get(`/video/${encodeURIComponent(videoKey)}/waveform`, {
+        params: { segmentDuration, samples },
+        timeout: 60000 // 60 second timeout for waveform generation
+      });
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching waveform:', error);
+      throw new Error(error.response?.data?.error || 'Failed to fetch waveform');
+    }
+  }
+
   async getVideoProgress(videoKey) {
     try {
       const response = await this.client.get(`/video/${encodeURIComponent(videoKey)}/progress`);

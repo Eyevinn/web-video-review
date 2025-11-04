@@ -1287,6 +1287,156 @@ class VideoService {
     }
   }
 
+  async getAudioWaveform(s3Key, segmentDuration = 10, samples = 1000) {
+    try {
+      console.log(`[Waveform] Generating audio waveform for ${s3Key} with ${samples} samples`);
+      
+      // Check cache first
+      const waveformCacheKey = `waveform:${s3Key}:${samples}`;
+      
+      if (!this.waveformCache) {
+        this.waveformCache = new Map();
+      }
+      
+      if (this.waveformCache.has(waveformCacheKey)) {
+        console.log(`[Waveform] Returning cached waveform for ${s3Key}`);
+        return this.waveformCache.get(waveformCacheKey);
+      }
+      
+      // Get video info to determine duration
+      const videoInfo = await this.getVideoInfo(s3Key);
+      
+      if (!videoInfo.audio) {
+        console.log(`[Waveform] No audio track found in ${s3Key}`);
+        return {
+          duration: videoInfo.duration,
+          samples: [],
+          sampleRate: 0,
+          hasAudio: false
+        };
+      }
+      
+      // Generate waveform data using FFmpeg
+      const waveformData = await this._generateWaveformData(s3Key, videoInfo.duration, samples);
+      
+      // Cache the result
+      this.waveformCache.set(waveformCacheKey, waveformData);
+      
+      console.log(`[Waveform] Generated waveform for ${s3Key}: ${waveformData.samples.length} samples`);
+      return waveformData;
+      
+    } catch (error) {
+      console.error(`[Waveform] Error generating waveform for ${s3Key}:`, error);
+      throw error;
+    }
+  }
+
+  async _generateWaveformData(s3Key, duration, samples) {
+    return new Promise(async (resolve, reject) => {
+      let inputSource;
+      
+      // Try to use local cached file first, otherwise fall back to signed URL
+      if (this.enableLocalCache) {
+        try {
+          const localFilePath = await this.ensureLocalFile(s3Key);
+          if (localFilePath && fsSync.existsSync(localFilePath)) {
+            inputSource = localFilePath;
+            console.log(`[Waveform] Using local cached file: ${localFilePath}`);
+          } else {
+            inputSource = s3Service.getSignedUrl(s3Key, 3600);
+            console.log(`[Waveform] Local file not available, using S3 URL`);
+          }
+        } catch (error) {
+          console.warn(`[Waveform] Error accessing local file, falling back to S3:`, error.message);
+          inputSource = s3Service.getSignedUrl(s3Key, 3600);
+        }
+      } else {
+        inputSource = s3Service.getSignedUrl(s3Key, 3600);
+        console.log(`[Waveform] Local cache disabled, using S3 URL`);
+      }
+      
+      // Calculate sample interval
+      const sampleInterval = duration / samples;
+      
+      console.log(`[Waveform] Extracting audio peaks with interval ${sampleInterval.toFixed(3)}s`);
+      
+      // Use FFmpeg to extract audio amplitude data
+      const ffmpeg = spawn('ffmpeg', [
+        '-i', inputSource,
+        '-filter_complex', `[0:a]compand,aresample=8000[out]`,
+        '-map', '[out]',
+        '-f', 'f32le',
+        '-ac', '1',
+        '-'
+      ], {
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      
+      let audioBuffer = Buffer.alloc(0);
+      let stderr = '';
+      
+      ffmpeg.stdout.on('data', (data) => {
+        audioBuffer = Buffer.concat([audioBuffer, data]);
+      });
+      
+      ffmpeg.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+      
+      ffmpeg.on('close', (code) => {
+        if (code !== 0) {
+          console.error(`[Waveform] FFmpeg failed with code ${code}: ${stderr}`);
+          reject(new Error(`FFmpeg waveform extraction failed: ${stderr}`));
+          return;
+        }
+        
+        try {
+          // Convert raw audio data to amplitude samples
+          const float32Data = new Float32Array(audioBuffer.buffer, audioBuffer.byteOffset, audioBuffer.byteLength / 4);
+          
+          // Group samples and calculate RMS for each group
+          const samplesPerGroup = Math.floor(float32Data.length / samples);
+          const waveformSamples = [];
+          
+          for (let i = 0; i < samples; i++) {
+            const start = i * samplesPerGroup;
+            const end = Math.min(start + samplesPerGroup, float32Data.length);
+            
+            // Calculate RMS (Root Mean Square) for this group
+            let sum = 0;
+            let count = 0;
+            for (let j = start; j < end; j++) {
+              sum += float32Data[j] * float32Data[j];
+              count++;
+            }
+            
+            const rms = count > 0 ? Math.sqrt(sum / count) : 0;
+            waveformSamples.push(Math.min(1.0, rms)); // Normalize to 0-1
+          }
+          
+          const waveformData = {
+            duration: duration,
+            samples: waveformSamples,
+            sampleRate: 8000,
+            hasAudio: true,
+            samplesPerSecond: samples / duration
+          };
+          
+          resolve(waveformData);
+          
+        } catch (error) {
+          console.error(`[Waveform] Error processing audio data:`, error);
+          reject(error);
+        }
+      });
+      
+      ffmpeg.on('error', (error) => {
+        console.error(`[Waveform] FFmpeg spawn error:`, error);
+        reject(error);
+      });
+    });
+  }
+
 }
 
 module.exports = new VideoService();

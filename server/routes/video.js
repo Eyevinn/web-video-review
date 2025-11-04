@@ -248,6 +248,20 @@ router.get('/:key/thumbnails', async (req, res) => {
   }
 });
 
+router.get('/:key/waveform', async (req, res) => {
+  try {
+    const key = decodeURIComponent(req.params.key);
+    const { segmentDuration = 10, samples = 1000 } = req.query;
+    
+    const waveform = await videoService.getAudioWaveform(key, parseInt(segmentDuration), parseInt(samples));
+    res.json(waveform);
+    
+  } catch (error) {
+    console.error('Error getting audio waveform:', error);
+    res.status(500).json({ error: 'Failed to get audio waveform' });
+  }
+});
+
 // Route for individual thumbnail files (e.g., thumb000.jpg, thumb001.jpg)
 router.get('/:key/thumb:thumbFile', async (req, res) => {
   try {
