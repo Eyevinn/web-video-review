@@ -86,9 +86,9 @@ The application will be available at `http://localhost:3001`.
    Edit `.env` with your configuration:
    ```env
    # AWS S3 Configuration
-   AWS_ACCESS_KEY_ID=your-access-key
-   AWS_SECRET_ACCESS_KEY=your-secret-key
-   AWS_REGION=us-east-1
+   S3_ACCESS_KEY_ID=your-access-key
+   S3_SECRET_ACCESS_KEY=your-secret-key
+   S3_REGION=us-east-1
    S3_BUCKET=your-video-bucket
    
    # Application Settings
@@ -161,9 +161,9 @@ The application will be available at `http://localhost:3001`.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PORT` | Application port | 3001 |
-| `AWS_ACCESS_KEY_ID` | AWS access key | Required |
-| `AWS_SECRET_ACCESS_KEY` | AWS secret key | Required |
-| `AWS_REGION` | AWS region | us-east-1 |
+| `S3_ACCESS_KEY_ID` | S3 access key | Required |
+| `S3_SECRET_ACCESS_KEY` | S3 secret key | Required |
+| `S3_REGION` | S3 region | us-east-1 |
 | `S3_BUCKET` | S3 bucket name | Required |
 | `LOCAL_CACHE_DIR` | Local cache directory | /tmp/videoreview |
 | `MAX_LOCAL_CACHE_SIZE` | Cache size limit (bytes) | 10GB |
