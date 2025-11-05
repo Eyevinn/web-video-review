@@ -40,13 +40,18 @@ code {
   flex: 1;
   display: flex;
   height: calc(100vh - 80px);
+  overflow: hidden; /* Prevent main content from growing beyond viewport */
 }
 
 .sidebar {
   width: 300px;
   background-color: #2a2a2a;
   border-right: 1px solid #3a3a3a;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  height: 100%; /* Force sidebar to use available height only */
+  max-height: calc(100vh - 80px); /* Prevent growing beyond viewport */
 }
 
 .video-content {
@@ -54,15 +59,20 @@ code {
   display: flex;
   flex-direction: column;
   background-color: #1a1a1a;
+  min-width: 0; /* Allow content to shrink properly */
+  height: calc(100vh - 80px); /* Use full available height */
+  overflow-y: auto; /* Allow scrolling for video+timeline content */
+  overflow-x: hidden;
 }
 
 .video-player-container {
-  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
   background-color: #000000;
   position: relative;
+  min-height: 60vh; /* Allow video to be properly sized for aspect ratio */
+  flex-shrink: 0; /* Don't shrink video player */
 }
 
 .video-player {
@@ -82,7 +92,8 @@ code {
   background-color: #2a2a2a;
   padding: 1rem;
   border-top: 1px solid #3a3a3a;
-  min-height: 120px;
+  min-height: 120px; /* Allow timeline to grow if needed */
+  flex-shrink: 0; /* Prevent timeline from shrinking */
 }
 
 .loading {
@@ -105,6 +116,9 @@ code {
 
 .video-list {
   padding: 1rem;
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .video-list h3 {

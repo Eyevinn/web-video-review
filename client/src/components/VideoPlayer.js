@@ -19,6 +19,7 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
   const [progressReady, setProgressReady] = useState(false);
   const [activeAudioTrack, setActiveAudioTrack] = useState(null);
   const [availableAudioTracks, setAvailableAudioTracks] = useState([]);
+  const [expectedFragments, setExpectedFragments] = useState(3); // Default to 3, will be calculated based on video duration
   
 
   const switchAudioTrack = useCallback((trackIndex) => {
@@ -162,6 +163,9 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
       setLoadedFragments(0);
       setIsBuffering(true);
       
+      // Reset to default, will be calculated when videoInfo is available
+      setExpectedFragments(3);
+      
       // Initialize HLS immediately - this will trigger generation if needed
       if (Hls.isSupported()) {
         const hls = new Hls({
@@ -293,9 +297,10 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
           setLoadedFragments(prev => {
             const newCount = prev + 1;
             
-            // Wait for 3 fragments before allowing playback for real-time encoding
-            if (newCount >= 3 && isBuffering) {
+            // Wait for expectedFragments before allowing playback (adaptive for short videos)
+            if (newCount >= expectedFragments && isBuffering) {
               setIsBuffering(false);
+              console.log(`Buffering complete: ${newCount}/${expectedFragments} fragments loaded`);
             }
             
             return newCount;
@@ -393,6 +398,17 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
       }
     };
   }, [videoKey]);
+
+  // Calculate expected fragments when videoInfo becomes available
+  useEffect(() => {
+    if (videoInfo && videoInfo.duration) {
+      const segmentDuration = 10; // Default segment duration
+      const calculatedFragments = Math.ceil(videoInfo.duration / segmentDuration);
+      const minFragmentsNeeded = Math.min(3, Math.max(1, Math.ceil(calculatedFragments / 2)));
+      setExpectedFragments(minFragmentsNeeded);
+      console.log(`Video duration: ${videoInfo.duration}s, expected fragments: ${calculatedFragments}, buffering threshold: ${minFragmentsNeeded}`);
+    }
+  }, [videoInfo]);
 
   // Expose switchAudioTrack function to parent component
   useEffect(() => {
@@ -753,7 +769,7 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
           textAlign: 'center',
           borderTop: '1px solid #3a3a3a'
         }}>
-          ⏳ Buffering... ({loadedFragments}/3 chunks loaded)
+          ⏳ Buffering... ({loadedFragments}/{expectedFragments} chunks loaded)
         </div>
       )}
 

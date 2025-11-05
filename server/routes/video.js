@@ -4,29 +4,42 @@ const videoService = require('../services/videoService');
 const path = require('path');
 const fs = require('fs');
 
-async function waitForInitialSegments(tempDir, minSegments = 2, timeoutMs = 30000) {
+async function waitForInitialSegments(tempDir, minSegments = 2, timeoutMs = 30000, expectedSegments = null) {
   return new Promise((resolve, reject) => {
     const startTime = Date.now();
+    
+    // For short videos, adjust minimum segments needed and timeout
+    const adjustedMinSegments = expectedSegments ? Math.min(minSegments, Math.max(1, Math.ceil(expectedSegments / 2))) : minSegments;
+    const adjustedTimeout = expectedSegments && expectedSegments <= 2 ? Math.min(timeoutMs, 10000) : timeoutMs; // Shorter timeout for very short videos
+    
+    console.log(`Waiting for ${adjustedMinSegments} segments (expected total: ${expectedSegments || 'unknown'}), timeout: ${adjustedTimeout}ms`);
     
     const checkSegments = () => {
       try {
         let segmentCount = 0;
-        for (let i = 0; i < minSegments; i++) {
+        let totalSegmentCount = 0;
+        
+        // Count all existing segments, not just up to minSegments
+        for (let i = 0; i < (expectedSegments || 20); i++) {
           const segmentPath = path.join(tempDir, `segment${i.toString().padStart(3, '0')}.ts`);
           if (fs.existsSync(segmentPath)) {
-            segmentCount++;
+            totalSegmentCount++;
+            if (i < adjustedMinSegments) {
+              segmentCount++;
+            }
           }
         }
         
-        if (segmentCount >= minSegments) {
-          console.log(`Found ${segmentCount} initial segments, ready to serve playlist`);
+        // Ready if we have enough initial segments OR if all expected segments are complete
+        if (segmentCount >= adjustedMinSegments || (expectedSegments && totalSegmentCount >= expectedSegments)) {
+          console.log(`Found ${totalSegmentCount} segments (${segmentCount} initial), ready to serve playlist`);
           resolve();
           return;
         }
         
         const elapsed = Date.now() - startTime;
-        if (elapsed >= timeoutMs) {
-          console.log(`Timeout waiting for segments after ${elapsed}ms, serving playlist anyway`);
+        if (elapsed >= adjustedTimeout) {
+          console.log(`Timeout waiting for segments after ${elapsed}ms (${totalSegmentCount} segments available), serving playlist anyway`);
           resolve();
           return;
         }
@@ -113,7 +126,7 @@ router.get('/:key/playlist.m3u8', async (req, res) => {
       const playlistPath = path.join(cacheEntry.tempDir, 'playlist.m3u8');
       
       if (require('fs').existsSync(playlistPath)) {
-        // Wait for at least 2 segments before serving the playlist
+        // Wait for segments before serving the playlist
         await waitForInitialSegments(cacheEntry.tempDir, 2, 30000);
         
         // Read the updated playlist after waiting for segments

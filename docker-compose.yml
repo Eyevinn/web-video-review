@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  # Combined application service
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: video-review-app
+    ports:
+      - "${PORT:-3001}:${PORT:-3001}"
+    environment:
+      - NODE_ENV=production
+      - PORT=${PORT:-3001}
+      # AWS credentials (set these in your environment or .env file)
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - S3_BUCKET=${S3_BUCKET}
+      # Application settings
+      - LOCAL_CACHE_DIR=/tmp/videoreview
+      - MAX_LOCAL_CACHE_SIZE=10737418240
+      - ENABLE_LOCAL_CACHE=true
+    volumes:
+      # Mount volume for temporary video files and cache
+      - video_cache:/tmp/videoreview
+      # Optional: mount for logs
+      - ./logs:/app/logs
+    networks:
+      - video-review-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${PORT:-3001}/", "&&", "curl", "-f", "http://localhost:${PORT:-3001}/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  # Persistent volume for video cache
+  video_cache:
+    driver: local
+
+networks:
+  video-review-network:
+    driver: bridge

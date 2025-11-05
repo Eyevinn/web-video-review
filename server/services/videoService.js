@@ -49,8 +49,14 @@ class VideoService {
         type: 'videotoolbox',
         encoder: 'h264_videotoolbox',
         preset: undefined, // VideoToolbox doesn't use presets like x264
-        quality: '-q:v 65', // Use quality setting instead of CRF
-        rateControl: '-realtime 1'
+        quality: '-q:v 23', // Better quality setting (23 is good, 65 was too low)
+        rateControl: '', // Remove realtime flag for complex processing
+        fallback: {
+          encoder: 'libx264',
+          preset: '-preset medium',
+          quality: '-crf 23',
+          rateControl: ''
+        }
       };
     }
     
@@ -120,8 +126,14 @@ class VideoService {
       if (requiredDuration !== null) {
         const hasEnoughData = await this.checkSufficientDataForDuration(s3Key, localPath, requiredDuration);
         if (!hasEnoughData) {
-          console.log(`[Local Cache] File doesn't have enough data for ${requiredDuration}s, downloading more...`);
-          // Continue with download to get more data
+          console.log(`[Local Cache] File doesn't have enough data for ${requiredDuration}s, checking if download in progress...`);
+          
+          // Check if download is in progress - if so, wait progressively
+          if (this.activeDownloads.has(s3Key)) {
+            return await this.waitForSufficientData(s3Key, localPath, requiredDuration);
+          }
+          
+          // No download in progress, continue with new download
         } else {
           // Update access time for LRU cleanup
           this.localFileCache.set(s3Key, {
@@ -151,6 +163,12 @@ class VideoService {
     // Check if download is already in progress
     if (this.activeDownloads.has(s3Key)) {
       console.log(`[Local Cache] Waiting for ongoing download of ${s3Key}`);
+      
+      // If we need a specific duration, wait progressively instead of waiting for complete download
+      if (requiredDuration !== null) {
+        return await this.waitForSufficientData(s3Key, localPath, requiredDuration);
+      }
+      
       return await this.activeDownloads.get(s3Key);
     }
 
@@ -167,6 +185,67 @@ class VideoService {
       this.activeDownloads.delete(s3Key);
       throw error;
     }
+  }
+
+  async waitForSufficientData(s3Key, localPath, requiredDuration, maxWaitMs = 30000) {
+    const startTime = Date.now();
+    const checkInterval = 500; // Check every 500ms
+    
+    console.log(`[Local Cache] Progressively waiting for sufficient data for ${requiredDuration}s from ${s3Key}`);
+    
+    return new Promise((resolve, reject) => {
+      const checkData = async () => {
+        try {
+          // Check if file exists and has sufficient data
+          if (fsSync.existsSync(localPath)) {
+            const hasEnough = await this.checkSufficientDataForDuration(s3Key, localPath, requiredDuration);
+            if (hasEnough) {
+              const waitTime = Date.now() - startTime;
+              console.log(`[Local Cache] Sufficient data available after ${waitTime}ms progressive wait`);
+              
+              // Update cache with current partial file
+              const stats = fsSync.statSync(localPath);
+              this.localFileCache.set(s3Key, {
+                path: localPath,
+                size: stats.size,
+                lastAccessed: new Date(),
+                downloadTime: new Date(),
+                isPartial: true
+              });
+              
+              return resolve(localPath);
+            }
+          }
+          
+          // Check if we've exceeded max wait time
+          const elapsed = Date.now() - startTime;
+          if (elapsed >= maxWaitMs) {
+            console.log(`[Local Cache] Progressive wait timeout after ${elapsed}ms, falling back to complete download`);
+            // Fall back to waiting for complete download
+            if (this.activeDownloads.has(s3Key)) {
+              return resolve(await this.activeDownloads.get(s3Key));
+            } else {
+              return reject(new Error(`Download not found after timeout for ${s3Key}`));
+            }
+          }
+          
+          // Continue checking
+          setTimeout(checkData, checkInterval);
+          
+        } catch (error) {
+          console.warn(`[Local Cache] Error during progressive wait:`, error.message);
+          // Fall back to complete download wait
+          if (this.activeDownloads.has(s3Key)) {
+            return resolve(await this.activeDownloads.get(s3Key));
+          } else {
+            return reject(error);
+          }
+        }
+      };
+      
+      // Start checking immediately
+      checkData();
+    });
   }
 
   async downloadFileToLocal(s3Key, localPath, requiredDuration = null) {
@@ -583,10 +662,10 @@ class VideoService {
     
     // Create temporary directory for HLS output with better path sanitization
     const sanitizedKey = s3Key.replace(/[^a-zA-Z0-9._-]/g, '_').replace(/_{2,}/g, '_');
-    const tempDir = path.join('/tmp/videoreview', 'live-hls', sanitizedKey);
+    const tempDir = path.join(this.localCacheDir, 'live-hls', sanitizedKey);
     
     // Ensure base directory exists first
-    const baseDir = path.join('/tmp/videoreview', 'live-hls');
+    const baseDir = path.join(this.localCacheDir, 'live-hls');
     await fs.mkdir(baseDir, { recursive: true });
     
     // Clean up any existing directory for this video to start fresh
@@ -639,7 +718,7 @@ class VideoService {
     }
     
     // Final validation: if using local file, warn about potential incomplete downloads
-    if (inputSource.includes('/tmp/videoreview/')) {
+    if (inputSource.includes(this.localCacheDir)) {
       const stats = fsSync.statSync(inputSource);
       const cacheEntry = this.localFileCache.get(s3Key);
       const expectedSize = videoInfo.size;
@@ -835,14 +914,14 @@ class VideoService {
       // Use VideoToolbox hardware acceleration on macOS
       ffmpegArgs.push(
         '-c:v', hwAccel.encoder,
-        '-q:v', '65',
-        '-realtime', '1',
+        '-q:v', '23', // Use better quality setting (23 instead of 65)
         '-maxrate', '2000k',
         '-bufsize', '4000k',
         '-r', '25',
         '-pix_fmt', 'yuv420p',
         '-vsync', 'cfr',
       );
+      // Remove realtime flag for complex processing
     } else if (hwAccel.type === 'nvenc') {
       // Use NVENC hardware acceleration on NVIDIA systems
       ffmpegArgs.push(
@@ -1015,7 +1094,7 @@ class VideoService {
           // Check if this might be due to incomplete file download
           if (stderr.includes('End of file') || stderr.includes('Invalid data found') || stderr.includes('truncated')) {
             console.error(`[Native Live HLS] Error suggests incomplete file download. Expected duration: ${videoInfo.duration}s`);
-            if (inputSource.includes('/tmp/videoreview/')) {
+            if (inputSource.includes(this.localCacheDir)) {
               const stats = fsSync.statSync(inputSource);
               console.error(`[Native Live HLS] Local file size: ${(stats.size/1024/1024).toFixed(1)}MB`);
             }
@@ -1090,6 +1169,19 @@ class VideoService {
         console.warn(`[Native Live HLS] Failed to cleanup cache for ${s3Key}:`, error.message);
       }
       this.nativeHlsCache.delete(s3Key);
+    }
+  }
+
+  isProcessAlive(process) {
+    if (!process || process.killed || process.exitCode !== null) {
+      return false;
+    }
+    
+    try {
+      // Sending signal 0 to a process checks if it's alive without actually sending a signal
+      return process.kill(0);
+    } catch (error) {
+      return false;
     }
   }
 
@@ -1260,7 +1352,39 @@ class VideoService {
         }
       }
     } else if (this.currentlyLoadedVideo === s3Key) {
-      console.log(`Same video ${s3Key} - keeping existing processes`);
+      // Check if existing processes are still alive before keeping them
+      let hasLiveProcesses = false;
+      let deadProcessesFound = false;
+      
+      // Check active processes
+      if (this.activeProcesses) {
+        for (const [cacheKey, processPromise] of this.activeProcesses.entries()) {
+          if (cacheKey.includes(s3Key)) {
+            // For promises we can't easily check liveness, assume they're valid if still in map
+            hasLiveProcesses = true;
+          }
+        }
+      }
+      
+      // Check HLS processes  
+      if (this.nativeHlsCache && this.nativeHlsCache.has(s3Key)) {
+        const cacheEntry = this.nativeHlsCache.get(s3Key);
+        if (cacheEntry && cacheEntry.ffmpegProcess) {
+          if (this.isProcessAlive(cacheEntry.ffmpegProcess)) {
+            hasLiveProcesses = true;
+          } else {
+            deadProcessesFound = true;
+            console.log(`Dead FFmpeg process found for ${s3Key}, will restart`);
+          }
+        }
+      }
+      
+      if (hasLiveProcesses && !deadProcessesFound) {
+        console.log(`Same video ${s3Key} - keeping existing live processes`);
+      } else {
+        console.log(`Same video ${s3Key} - found dead processes, aborting all and restarting`);
+        this.abortAllFFmpegProcesses(s3Key);
+      }
     } else {
       console.log(`Loading first video ${s3Key}`);
     }
@@ -1432,7 +1556,10 @@ class VideoService {
           
           processingProgress = Math.round((existingSegments / expectedSegments) * 100);
           
-          if (existingSegments >= 3) {
+          // For short videos, we need to be more flexible with the ready threshold
+          const minSegmentsForReady = Math.min(3, Math.max(1, Math.ceil(expectedSegments / 2)));
+          
+          if (existingSegments >= minSegmentsForReady || existingSegments === expectedSegments) {
             status = 'ready';
             message = 'Ready to play';
           } else if (existingSegments > 0) {
@@ -1561,20 +1688,25 @@ class VideoService {
       
       console.log(`[Waveform] Extracting audio peaks with interval ${sampleInterval.toFixed(3)}s`);
       
-      // Determine the appropriate audio filter based on mono stream combinations
-      let audioFilter = '[0:a]compand,aresample=8000[out]';
-      let audioInput = '[0:a]';
+      // Determine the appropriate audio filter based on audio stream layout
+      let audioFilter = '[0:a]aformat=channel_layouts=stereo|mono[audio];[audio]compand,aresample=8000[out]';
       
-      // Check if we have mono stream combinations
-      if (videoInfo.monoStreamCombinations && videoInfo.monoStreamCombinations.canCombineFirstTwo) {
+      // For complex multi-track layouts (more than 2 mono streams), use first stream only
+      const hasComplexLayout = videoInfo.audioStreams && videoInfo.audioStreams.length > 2 && 
+                               videoInfo.audioStreams.filter(s => parseInt(s.channels) === 1).length > 2;
+      
+      if (hasComplexLayout) {
+        console.log(`[Waveform] Complex multi-track layout detected (${videoInfo.audioStreams.length} streams), using first audio stream only`);
+        audioFilter = '[0:a:1]aformat=channel_layouts=mono[audio];[audio]compand,aresample=8000[out]';
+      } else if (videoInfo.monoStreamCombinations && videoInfo.monoStreamCombinations.canCombineFirstTwo) {
         const combo = videoInfo.monoStreamCombinations;
         console.log(`[Waveform] Using combined stereo from mono streams ${combo.stream1Index} and ${combo.stream2Index}`);
         
-        // Use amerge filter to combine the mono streams, then process for waveform
-        audioFilter = `[0:a:${combo.stream1Index}][0:a:${combo.stream2Index}]amerge=inputs=2[stereo];[stereo]compand,aresample=8000[out]`;
-        audioInput = '[stereo]';
+        // Use improved mono combination with explicit channel layout mapping
+        // This prevents channel layout overlap warnings and handles multi-track properly
+        audioFilter = `[0:a:${combo.stream1Index}]aformat=channel_layouts=mono[left];[0:a:${combo.stream2Index}]aformat=channel_layouts=mono[right];[left][right]amerge=inputs=2[merged];[merged]aformat=channel_layouts=stereo[stereo];[stereo]compand,aresample=8000[out]`;
       } else {
-        console.log(`[Waveform] Using standard first audio stream`);
+        console.log(`[Waveform] Using standard first audio stream with channel format normalization`);
       }
       
       // Use FFmpeg to extract audio amplitude data
@@ -1691,9 +1823,12 @@ class VideoService {
       let filterComplex = '';
       if (hasMonoCombination) {
         const combo = videoInfo.monoStreamCombinations;
-        filterComplex = `[0:a:${combo.stream1Index}][0:a:${combo.stream2Index}]amerge=inputs=2[stereo];[stereo]ebur128=framelog=verbose`;
+        // Use more robust mono combination with explicit channel mapping
+        // This prevents channel layout overlap warnings by using proper channel mapping
+        filterComplex = `[0:a:${combo.stream1Index}]aformat=channel_layouts=mono[left];[0:a:${combo.stream2Index}]aformat=channel_layouts=mono[right];[left][right]amerge=inputs=2[merged];[merged]aformat=channel_layouts=stereo[stereo];[stereo]ebur128=framelog=verbose:dualmono=true`;
       } else {
-        filterComplex = `[0:a]ebur128=framelog=verbose`;
+        // For standard audio, ensure proper channel handling and add error resilience
+        filterComplex = `[0:a]aformat=channel_layouts=stereo|mono[audio];[audio]ebur128=framelog=verbose`;
       }
 
       const ffmpegArgs = [
