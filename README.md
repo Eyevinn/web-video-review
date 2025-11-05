@@ -1,15 +1,26 @@
 # Web Video Review
 
-A professional web application for reviewing broadcast video files stored in S3-compatible buckets. Features real-time video streaming with FFmpeg-powered transcoding and timeline navigation with seek functionality.
+A professional web application for reviewing broadcast video files stored in S3-compatible buckets. Features real-time video streaming with FFmpeg-powered transcoding, timeline navigation, and comprehensive video analysis tools.
+
+![Web Video Review Interface](screenshot1.png)
 
 ## Features
 
 - **S3 Integration**: Connect to any S3-compatible storage (AWS S3, MinIO, etc.)
-- **Real-time Transcoding**: FFmpeg-powered conversion to web-friendly formats
-- **Timeline Navigation**: Visual timeline with thumbnail previews
-- **Seek Functionality**: Jump to any point in the video instantly
+- **HLS Streaming**: Live HTTP Live Streaming with adaptive segmentation and progressive playlist updates
+- **Video Analysis Tools**: 
+  - EBU R128 loudness measurement and real-time monitoring
+  - Audio waveform visualization with configurable sample rates
+  - Video thumbnails and frame previews
+  - Multi-track audio support (up to 8+ separate mono tracks)
+- **Timeline Navigation**: Visual timeline with thumbnail previews and seek functionality
+- **Progressive Download**: Smart caching with partial file support for large video files
+- **Hardware Acceleration**: VideoToolbox acceleration on macOS for optimal performance
 - **Broadcast Format Support**: Handles large broadcast formats (MXF, TS, M2TS, etc.)
-- **Responsive Design**: Professional interface optimized for video review
+- **Responsive Design**: Independent video player and file list layouts
+- **Docker Support**: Single container architecture with easy deployment
+
+![Video Analysis Tools](screenshot2.png)
 
 ## Architecture
 
@@ -26,14 +37,35 @@ A professional web application for reviewing broadcast video files stored in S3-
 - File browser for S3 contents
 - Responsive video review interface
 
-## Prerequisites
+## Quick Start with Docker
 
-- Node.js 16+ and npm
+The easiest way to get started is using Docker:
+
+```bash
+# Clone the repository
+git clone https://github.com/eyevinn/web-video-review.git
+cd web-video-review
+
+# Set up environment variables
+cp .env.example .env
+# Edit .env with your AWS credentials and S3 bucket
+
+# Run with Docker Compose
+docker-compose up
+```
+
+The application will be available at `http://localhost:3001`.
+
+## Manual Installation
+
+### Prerequisites
+
+- Node.js 18+ and npm
 - FFmpeg installed and accessible in PATH
 - S3-compatible storage with video files
 - S3 access credentials
 
-## Installation
+### Installation
 
 1. **Clone the repository**
    ```bash
@@ -51,26 +83,20 @@ A professional web application for reviewing broadcast video files stored in S3-
    cp .env.example .env
    ```
    
-   Edit `.env` with your S3 configuration:
+   Edit `.env` with your configuration:
    ```env
-   # For AWS S3
-   S3_ENDPOINT=https://s3.amazonaws.com
+   # AWS S3 Configuration
+   AWS_ACCESS_KEY_ID=your-access-key
+   AWS_SECRET_ACCESS_KEY=your-secret-key
+   AWS_REGION=us-east-1
    S3_BUCKET=your-video-bucket
-   S3_ACCESS_KEY_ID=your-access-key
-   S3_SECRET_ACCESS_KEY=your-secret-key
-   S3_REGION=us-east-1
-   # AWS_SESSION_TOKEN=your-session-token  # Optional: for temporary credentials/IAM roles
    
-   # For MinIO or other S3-compatible storage
-   # S3_ENDPOINT=https://your-minio-endpoint.com
-   # S3_BUCKET=your-bucket-name
-   # S3_ACCESS_KEY_ID=your-minio-access-key
-   # S3_SECRET_ACCESS_KEY=your-minio-secret-key
-   # S3_REGION=us-east-1
-   
+   # Application Settings
    PORT=3001
-   FFMPEG_PATH=/usr/local/bin/ffmpeg
-   CHUNK_DURATION=10
+   LOCAL_CACHE_DIR=/tmp/videoreview
+   MAX_LOCAL_CACHE_SIZE=10737418240
+   ENABLE_LOCAL_CACHE=true
+   DEBUG=false
    ```
    
    **Important:** Make sure your S3 credentials have the following permissions:
@@ -104,14 +130,22 @@ A professional web application for reviewing broadcast video files stored in S3-
 - `GET /api/s3/video/:key/metadata` - Get video file metadata
 - `GET /api/s3/video/:key/url` - Generate signed URL
 
-### Video Routes
-- `GET /api/video/:key/info` - Get detailed video information
-- `GET /api/video/:key/stream` - Stream video with optional start time
-- `GET /api/video/:key/seek` - Seek to specific time and stream chunk
-- `GET /api/video/:key/playlist.m3u8` - HLS playlist for streaming
-- `GET /api/video/:key/segment/:index` - Individual HLS segments
-- `GET /api/video/:key/thumbnails` - Extract timeline thumbnails
-- `GET /api/video/:key/thumbnail` - Get thumbnail at specific time
+### Video Operations
+- `GET /api/video/:key/info` - Get video metadata
+- `GET /api/video/:key/playlist.m3u8` - HLS playlist generation
+- `GET /api/video/:key/segment:id` - HLS segment streaming
+- `GET /api/video/:key/stream` - Direct video streaming
+- `GET /api/video/:key/seek` - Time-based seeking
+
+### Analysis Tools
+- `GET /api/video/:key/waveform` - Audio waveform data
+- `GET /api/video/:key/ebu-r128` - EBU R128 loudness analysis
+- `GET /api/video/:key/thumbnails` - Video thumbnail generation
+- `GET /api/video/:key/progress` - Download/processing progress
+
+### Management
+- `POST /api/video/abort-all` - Abort all FFmpeg processes
+- `POST /api/video/:key/abort` - Abort processes for specific video
 
 ## Supported Video Formats
 
@@ -124,15 +158,17 @@ A professional web application for reviewing broadcast video files stored in S3-
 
 ### Environment Variables
 
-- `S3_ENDPOINT` - S3 endpoint URL
-- `S3_BUCKET` - S3 bucket name
-- `S3_ACCESS_KEY_ID` - S3 access key
-- `S3_SECRET_ACCESS_KEY` - S3 secret key
-- `S3_REGION` - S3 region
-- `AWS_SESSION_TOKEN` - Optional: Session token for temporary credentials or IAM roles
-- `PORT` - Server port (default: 3001)
-- `FFMPEG_PATH` - Path to FFmpeg binary
-- `CHUNK_DURATION` - HLS segment duration in seconds
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PORT` | Application port | 3001 |
+| `AWS_ACCESS_KEY_ID` | AWS access key | Required |
+| `AWS_SECRET_ACCESS_KEY` | AWS secret key | Required |
+| `AWS_REGION` | AWS region | us-east-1 |
+| `S3_BUCKET` | S3 bucket name | Required |
+| `LOCAL_CACHE_DIR` | Local cache directory | /tmp/videoreview |
+| `MAX_LOCAL_CACHE_SIZE` | Cache size limit (bytes) | 10GB |
+| `ENABLE_LOCAL_CACHE` | Enable local caching | true |
+| `DEBUG` | Enable debug logging | false |
 
 ### FFmpeg Requirements
 
