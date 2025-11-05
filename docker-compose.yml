@@ -21,6 +21,7 @@ services:
       - LOCAL_CACHE_DIR=/tmp/videoreview
       - MAX_LOCAL_CACHE_SIZE=10737418240
       - ENABLE_LOCAL_CACHE=true
+      - DEBUG=${DEBUG:-false}  # Set to 'true' to enable verbose debug logging
     volumes:
       # Mount volume for temporary video files and cache
       - video_cache:/tmp/videoreview

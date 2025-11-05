@@ -29,6 +29,7 @@ class VideoService {
     this.localCacheDir = process.env.LOCAL_CACHE_DIR || '/tmp/videoreview';
     this.maxLocalCacheSize = parseInt(process.env.MAX_LOCAL_CACHE_SIZE) || 10 * 1024 * 1024 * 1024; // 10GB default
     this.enableLocalCache = process.env.ENABLE_LOCAL_CACHE !== 'false'; // Enable by default
+    this.debugLogging = process.env.DEBUG === 'true' || process.env.NODE_ENV === 'development'; // Debug logging control
     
     // Create cache directory if it doesn't exist
     this.initializeCacheDirectory();
@@ -126,7 +127,7 @@ class VideoService {
       if (requiredDuration !== null) {
         const hasEnoughData = await this.checkSufficientDataForDuration(s3Key, localPath, requiredDuration);
         if (!hasEnoughData) {
-          console.log(`[Local Cache] File doesn't have enough data for ${requiredDuration}s, checking if download in progress...`);
+          this.debugLog(`[Local Cache] File doesn't have enough data for ${requiredDuration}s, checking if download in progress...`);
           
           // Check if download is in progress - if so, wait progressively
           if (this.activeDownloads.has(s3Key)) {
@@ -143,7 +144,7 @@ class VideoService {
             downloadTime: this.localFileCache.get(s3Key)?.downloadTime || new Date()
           });
           
-          console.log(`[Local Cache] Using cached file for ${s3Key} (sufficient data)`);
+          this.debugLog(`[Local Cache] Using cached file for ${s3Key} (sufficient data)`);
           return localPath;
         }
       } else {
@@ -155,14 +156,14 @@ class VideoService {
           downloadTime: this.localFileCache.get(s3Key)?.downloadTime || new Date()
         });
         
-        console.log(`[Local Cache] Using cached file for ${s3Key}`);
+        this.debugLog(`[Local Cache] Using cached file for ${s3Key}`);
         return localPath;
       }
     }
 
     // Check if download is already in progress
     if (this.activeDownloads.has(s3Key)) {
-      console.log(`[Local Cache] Waiting for ongoing download of ${s3Key}`);
+      this.debugLog(`[Local Cache] Waiting for ongoing download of ${s3Key}`);
       
       // If we need a specific duration, wait progressively instead of waiting for complete download
       if (requiredDuration !== null) {
@@ -173,7 +174,7 @@ class VideoService {
     }
 
     // Start download - always do full download but prioritize getting enough data quickly
-    console.log(`[Local Cache] Starting download of ${s3Key}${requiredDuration ? ` (need ${requiredDuration}s)` : ''}`);
+    this.debugLog(`[Local Cache] Starting download of ${s3Key}${requiredDuration ? ` (need ${requiredDuration}s)` : ''}`);
     const downloadPromise = this.downloadFileToLocal(s3Key, localPath, requiredDuration);
     this.activeDownloads.set(s3Key, downloadPromise);
 
@@ -191,7 +192,7 @@ class VideoService {
     const startTime = Date.now();
     const checkInterval = 500; // Check every 500ms
     
-    console.log(`[Local Cache] Progressively waiting for sufficient data for ${requiredDuration}s from ${s3Key}`);
+    this.debugLog(`[Local Cache] Progressively waiting for sufficient data for ${requiredDuration}s from ${s3Key}`);
     
     return new Promise((resolve, reject) => {
       const checkData = async () => {
@@ -201,17 +202,22 @@ class VideoService {
             const hasEnough = await this.checkSufficientDataForDuration(s3Key, localPath, requiredDuration);
             if (hasEnough) {
               const waitTime = Date.now() - startTime;
-              console.log(`[Local Cache] Sufficient data available after ${waitTime}ms progressive wait`);
+              this.debugLog(`[Local Cache] Sufficient data available after ${waitTime}ms progressive wait`);
               
-              // Update cache with current partial file
+              // Update cache with current partial file, preserving existing metadata
               const stats = fsSync.statSync(localPath);
-              this.localFileCache.set(s3Key, {
-                path: localPath,
-                size: stats.size,
-                lastAccessed: new Date(),
-                downloadTime: new Date(),
-                isPartial: true
-              });
+              const existingEntry = this.localFileCache.get(s3Key) || {};
+              
+              // Only update if our file size is newer/larger than what's already cached
+              if (!existingEntry.size || stats.size >= existingEntry.size) {
+                this.localFileCache.set(s3Key, {
+                  ...existingEntry, // Preserve existing data like totalSize, original downloadTime
+                  path: localPath,
+                  size: stats.size,
+                  lastAccessed: new Date(),
+                  isPartial: true // Keep as partial since we returned early with sufficient data
+                });
+              }
               
               return resolve(localPath);
             }
@@ -220,7 +226,7 @@ class VideoService {
           // Check if we've exceeded max wait time
           const elapsed = Date.now() - startTime;
           if (elapsed >= maxWaitMs) {
-            console.log(`[Local Cache] Progressive wait timeout after ${elapsed}ms, falling back to complete download`);
+            this.debugLog(`[Local Cache] Progressive wait timeout after ${elapsed}ms, falling back to complete download`);
             // Fall back to waiting for complete download
             if (this.activeDownloads.has(s3Key)) {
               return resolve(await this.activeDownloads.get(s3Key));
@@ -233,7 +239,7 @@ class VideoService {
           setTimeout(checkData, checkInterval);
           
         } catch (error) {
-          console.warn(`[Local Cache] Error during progressive wait:`, error.message);
+          this.warnLog(`[Local Cache] Error during progressive wait:`, error.message);
           // Fall back to complete download wait
           if (this.activeDownloads.has(s3Key)) {
             return resolve(await this.activeDownloads.get(s3Key));
@@ -289,12 +295,13 @@ class VideoService {
                     const downloadTime = Date.now() - startTime;
                     const sizeMB = (downloadedSize / 1024 / 1024).toFixed(2);
                     
-                    console.log(`[Local Cache] Early resolve - sufficient data for ${requiredDuration}s (${sizeMB}MB) in ${downloadTime}ms`);
+                    this.debugLog(`[Local Cache] Early resolve - sufficient data for ${requiredDuration}s (${sizeMB}MB) in ${downloadTime}ms`);
                     
                     // Update cache tracking with partial data
                     this.localFileCache.set(s3Key, {
                       path: localPath,
                       size: downloadedSize,
+                      totalSize: totalSize, // Store total size for progress calculation
                       lastAccessed: new Date(),
                       downloadTime: new Date(),
                       isPartial: true // Mark as partial download
@@ -318,12 +325,13 @@ class VideoService {
               const sizeMB = (downloadedSize / 1024 / 1024).toFixed(2);
               const speedMBps = (downloadedSize / 1024 / 1024 / (downloadTime / 1000)).toFixed(2);
               
-              console.log(`[Local Cache] Complete download of ${s3Key} (${sizeMB}MB) in ${downloadTime}ms (${speedMBps}MB/s)`);
+              this.infoLog(`[Local Cache] Complete download of ${s3Key} (${sizeMB}MB) in ${downloadTime}ms (${speedMBps}MB/s`);
               
               // Update cache tracking with complete data
               this.localFileCache.set(s3Key, {
                 path: localPath,
                 size: downloadedSize,
+                totalSize: totalSize, // Store total size for progress calculation
                 lastAccessed: new Date(),
                 downloadTime: new Date(),
                 isPartial: false // Mark as complete download
@@ -654,10 +662,10 @@ class VideoService {
     // Determine if this is an MXF source file
     const isMxfSource = s3Key.toLowerCase().endsWith('.mxf');
     
-    console.log(`[Native Live HLS] Video duration: ${videoInfo.duration}s, audio: ${hasAudio}`);
+    this.debugLog(`[Native Live HLS] Video duration: ${videoInfo.duration}s, audio: ${hasAudio}`);
     
     if (isMxfSource) {
-      console.log(`[Native Live HLS] Processing MXF file with special handling for duration and timing`);
+      this.debugLog(`[Native Live HLS] Processing MXF file with special handling for duration and timing`);
     }
     
     // Create temporary directory for HLS output with better path sanitization
@@ -677,7 +685,7 @@ class VideoService {
     
     // Create the specific temp directory
     await fs.mkdir(tempDir, { recursive: true });
-    console.log(`[Native Live HLS] Created temp directory: ${tempDir}`);
+    this.debugLog(`[Native Live HLS] Created temp directory: ${tempDir}`);
     
     const playlistPath = path.join(tempDir, 'playlist.m3u8');
     const segmentPattern = path.join(tempDir, 'segment%03d.ts');
@@ -699,22 +707,22 @@ class VideoService {
           if (cacheEntry && cacheEntry.isPartial === false) {
             // Complete file available
             inputSource = localFilePath;
-            console.log(`[Native Live HLS] Using complete cached file: ${localFilePath} (${(stats.size/1024/1024).toFixed(1)}MB)`);
+            this.debugLog(`[Native Live HLS] Using complete cached file: ${localFilePath} (${(stats.size/1024/1024).toFixed(1)}MB)`);
           } else {
             // Partial file - use streaming mode
             inputSource = localFilePath;
             useStreamingMode = true;
-            console.log(`[Native Live HLS] Using streaming mode with partial file: ${localFilePath} (${(stats.size/1024/1024).toFixed(1)}MB downloading...)`);
+            this.debugLog(`[Native Live HLS] Using streaming mode with partial file: ${localFilePath} (${(stats.size/1024/1024).toFixed(1)}MB downloading...)`);
           }
         }
       } catch (error) {
-        console.log(`[Native Live HLS] Local cache failed, using signed URL:`, error.message);
+        this.warnLog(`[Native Live HLS] Local cache failed, using signed URL:`, error.message);
       }
     }
     
     if (!inputSource) {
       inputSource = s3Service.getSignedUrl(s3Key, 3600);
-      console.log(`[Native Live HLS] Using signed URL approach`);
+      this.debugLog(`[Native Live HLS] Using signed URL approach`);
     }
     
     // Final validation: if using local file, warn about potential incomplete downloads
@@ -725,7 +733,7 @@ class VideoService {
       const isComplete = cacheEntry?.isPartial === false;
       const sizeMatch = expectedSize ? Math.abs(stats.size - expectedSize) < 1024 : 'Unknown';
       
-      console.log(`[Native Live HLS] Local file validation:`);
+      this.debugLog(`[Native Live HLS] Local file validation:`);
       console.log(`  - Current size: ${(stats.size/1024/1024).toFixed(1)}MB`);
       console.log(`  - Expected size: ${expectedSize ? (expectedSize/1024/1024).toFixed(1) + 'MB' : 'Unknown'}`);
       console.log(`  - Size match: ${sizeMatch === true ? 'Yes' : sizeMatch === false ? 'No' : sizeMatch}`);
@@ -762,7 +770,7 @@ class VideoService {
         );
       }
       
-      console.log(`[Native Live HLS] Using streaming mode flags for concurrent download/processing`);
+      this.debugLog(`[Native Live HLS] Using streaming mode flags for concurrent download/processing`);
     }
     
     if (hasAudio) {
@@ -788,7 +796,7 @@ class VideoService {
       // Use the full expected duration to prevent premature termination
       if (videoInfo.duration && videoInfo.duration > 0) {
         ffmpegArgs.push('-t', videoInfo.duration.toString());
-        console.log(`[Native Live HLS] Setting duration limit to ${videoInfo.duration}s for streaming mode`);
+        this.debugLog(`[Native Live HLS] Setting duration limit to ${videoInfo.duration}s for streaming mode`);
       }
     }
     
@@ -1172,6 +1180,26 @@ class VideoService {
     }
   }
 
+  // Debug logging helpers
+  debugLog(...args) {
+    if (this.debugLogging) {
+      console.log('[DEBUG]', ...args);
+    }
+  }
+
+  infoLog(...args) {
+    // Always log info-level messages
+    console.log('[INFO]', ...args);
+  }
+
+  warnLog(...args) {
+    console.warn('[WARN]', ...args);
+  }
+
+  errorLog(...args) {
+    console.error('[ERROR]', ...args);
+  }
+
   isProcessAlive(process) {
     if (!process || process.killed || process.exitCode !== null) {
       return false;
@@ -1374,13 +1402,13 @@ class VideoService {
             hasLiveProcesses = true;
           } else {
             deadProcessesFound = true;
-            console.log(`Dead FFmpeg process found for ${s3Key}, will restart`);
+            this.debugLog(`Dead FFmpeg process found for ${s3Key}, will restart`);
           }
         }
       }
       
       if (hasLiveProcesses && !deadProcessesFound) {
-        console.log(`Same video ${s3Key} - keeping existing live processes`);
+        this.debugLog(`Same video ${s3Key} - keeping existing live processes`);
       } else {
         console.log(`Same video ${s3Key} - found dead processes, aborting all and restarting`);
         this.abortAllFFmpegProcesses(s3Key);
@@ -1404,10 +1432,10 @@ class VideoService {
       const segmentPath = path.join(hlsCacheEntry.tempDir, `segment${segmentIndex.toString().padStart(3, '0')}.ts`);
       
       if (fsSync.existsSync(segmentPath)) {
-        console.log(`[Segment ${segmentIndex}] Serving native HLS segment from ${segmentPath}`);
+        this.debugLog(`[Segment ${segmentIndex}] Serving native HLS segment from ${segmentPath}`);
         return require('fs').createReadStream(segmentPath);
       } else {
-        console.log(`[Segment ${segmentIndex}] Native HLS segment not found: ${segmentPath}`);
+        this.debugLog(`[Segment ${segmentIndex}] Native HLS segment not found: ${segmentPath}`);
       }
     }
     
@@ -1686,7 +1714,7 @@ class VideoService {
       // Calculate sample interval
       const sampleInterval = duration / samples;
       
-      console.log(`[Waveform] Extracting audio peaks with interval ${sampleInterval.toFixed(3)}s`);
+      this.debugLog(`[Waveform] Extracting audio peaks with interval ${sampleInterval.toFixed(3)}s`);
       
       // Determine the appropriate audio filter based on audio stream layout
       let audioFilter = '[0:a]aformat=channel_layouts=stereo|mono[audio];[audio]compand,aresample=8000[out]';
@@ -1696,17 +1724,17 @@ class VideoService {
                                videoInfo.audioStreams.filter(s => parseInt(s.channels) === 1).length > 2;
       
       if (hasComplexLayout) {
-        console.log(`[Waveform] Complex multi-track layout detected (${videoInfo.audioStreams.length} streams), using first audio stream only`);
+        this.debugLog(`[Waveform] Complex multi-track layout detected (${videoInfo.audioStreams.length} streams), using first audio stream only`);
         audioFilter = '[0:a:1]aformat=channel_layouts=mono[audio];[audio]compand,aresample=8000[out]';
       } else if (videoInfo.monoStreamCombinations && videoInfo.monoStreamCombinations.canCombineFirstTwo) {
         const combo = videoInfo.monoStreamCombinations;
-        console.log(`[Waveform] Using combined stereo from mono streams ${combo.stream1Index} and ${combo.stream2Index}`);
+        this.debugLog(`[Waveform] Using combined stereo from mono streams ${combo.stream1Index} and ${combo.stream2Index}`);
         
         // Use improved mono combination with explicit channel layout mapping
         // This prevents channel layout overlap warnings and handles multi-track properly
         audioFilter = `[0:a:${combo.stream1Index}]aformat=channel_layouts=mono[left];[0:a:${combo.stream2Index}]aformat=channel_layouts=mono[right];[left][right]amerge=inputs=2[merged];[merged]aformat=channel_layouts=stereo[stereo];[stereo]compand,aresample=8000[out]`;
       } else {
-        console.log(`[Waveform] Using standard first audio stream with channel format normalization`);
+        this.debugLog(`[Waveform] Using standard first audio stream with channel format normalization`);
       }
       
       // Use FFmpeg to extract audio amplitude data

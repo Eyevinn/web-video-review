@@ -4,6 +4,13 @@ const videoService = require('../services/videoService');
 const path = require('path');
 const fs = require('fs');
 
+// Debug logging helper for routes
+const debugLog = (...args) => {
+  if (process.env.DEBUG === 'true' || process.env.NODE_ENV === 'development') {
+    console.log('[DEBUG]', ...args);
+  }
+};
+
 async function waitForInitialSegments(tempDir, minSegments = 2, timeoutMs = 30000, expectedSegments = null) {
   return new Promise((resolve, reject) => {
     const startTime = Date.now();
@@ -12,7 +19,7 @@ async function waitForInitialSegments(tempDir, minSegments = 2, timeoutMs = 3000
     const adjustedMinSegments = expectedSegments ? Math.min(minSegments, Math.max(1, Math.ceil(expectedSegments / 2))) : minSegments;
     const adjustedTimeout = expectedSegments && expectedSegments <= 2 ? Math.min(timeoutMs, 10000) : timeoutMs; // Shorter timeout for very short videos
     
-    console.log(`Waiting for ${adjustedMinSegments} segments (expected total: ${expectedSegments || 'unknown'}), timeout: ${adjustedTimeout}ms`);
+    debugLog(`Waiting for ${adjustedMinSegments} segments (expected total: ${expectedSegments || 'unknown'}), timeout: ${adjustedTimeout}ms`);
     
     const checkSegments = () => {
       try {
@@ -32,14 +39,14 @@ async function waitForInitialSegments(tempDir, minSegments = 2, timeoutMs = 3000
         
         // Ready if we have enough initial segments OR if all expected segments are complete
         if (segmentCount >= adjustedMinSegments || (expectedSegments && totalSegmentCount >= expectedSegments)) {
-          console.log(`Found ${totalSegmentCount} segments (${segmentCount} initial), ready to serve playlist`);
+          debugLog(`Found ${totalSegmentCount} segments (${segmentCount} initial), ready to serve playlist`);
           resolve();
           return;
         }
         
         const elapsed = Date.now() - startTime;
         if (elapsed >= adjustedTimeout) {
-          console.log(`Timeout waiting for segments after ${elapsed}ms (${totalSegmentCount} segments available), serving playlist anyway`);
+          debugLog(`Timeout waiting for segments after ${elapsed}ms (${totalSegmentCount} segments available), serving playlist anyway`);
           resolve();
           return;
         }
@@ -180,7 +187,7 @@ router.get('/:key/segment:segmentFile', async (req, res) => {
     const segmentIndex = parseInt(match[1]);
     const { segmentDuration = 10 } = req.query;
     
-    console.log(`[Route] Serving native HLS segment: ${key}/segment${segmentFile} (index: ${segmentIndex})`);
+    debugLog(`[Route] Serving native HLS segment: ${key}/segment${segmentFile} (index: ${segmentIndex})`);
     
     // Optimized headers for streaming
     res.setHeader('Content-Type', 'video/mp2t');
@@ -316,7 +323,7 @@ router.get('/:key/thumb:thumbFile', async (req, res) => {
         res.setHeader('Cache-Control', 'public, max-age=3600');
         res.setHeader('Access-Control-Allow-Origin', '*');
         
-        console.log(`[Route] Serving native HLS thumbnail: ${key}/thumb${thumbFile}`);
+        debugLog(`[Route] Serving native HLS thumbnail: ${key}/thumb${thumbFile}`);
         return fs.createReadStream(thumbnailPath).pipe(res);
       }
     }
