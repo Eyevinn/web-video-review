@@ -187,6 +187,11 @@ The application will be available at `http://localhost:3001`.
 | `MAX_LOCAL_CACHE_SIZE` | Cache size limit (bytes) | 10GB |
 | `ENABLE_LOCAL_CACHE` | Enable local caching | true |
 | `DEBUG` | Enable debug logging | false |
+| `FFMPEG_THREADS` | FFmpeg thread count | 2 |
+| `FFMPEG_PRESET` | FFmpeg encoding preset | veryfast |
+| `FFMPEG_CRF` | FFmpeg quality (CRF) | 25 |
+| `FFMPEG_BUFSIZE` | FFmpeg buffer size | 1M |
+| `FFMPEG_MAXRATE` | FFmpeg max bitrate | 1000k |
 
 ### FFmpeg Requirements
 
@@ -212,6 +217,35 @@ Ensure FFmpeg is installed with the following codecs:
 - Thumbnails are generated dynamically and cached
 - HLS segments provide efficient streaming of large files
 - Seeking uses FFmpeg's fast seek capabilities
+
+### Memory Optimization for Kubernetes
+
+When running on Kubernetes/Linux nodes, the application automatically falls back to software encoding which can consume significant memory. The following optimizations are implemented:
+
+**Default Memory-Optimized Settings:**
+- Limited to 2 FFmpeg threads (configurable via `FFMPEG_THREADS`)
+- Uses `veryfast` preset for reduced memory usage
+- Smaller buffer sizes (1MB vs 4MB)
+- x264 optimizations: single reference frame, no B-frames
+- Streaming mode with packet flushing
+
+**Recommended Kubernetes Resource Limits:**
+```yaml
+resources:
+  limits:
+    memory: "2Gi"
+    cpu: "1000m"
+  requests:
+    memory: "1Gi"
+    cpu: "500m"
+env:
+- name: MAX_LOCAL_CACHE_SIZE
+  value: "536870912"  # 512MB
+- name: NODE_OPTIONS
+  value: "--max-old-space-size=1536"
+```
+
+See `k8s-deployment-example.yml` for a complete Kubernetes deployment configuration.
 
 ## Troubleshooting
 
