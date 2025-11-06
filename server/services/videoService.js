@@ -1027,7 +1027,10 @@ class VideoService {
       
       // Set up timeout to resolve early for live streaming
       const earlyResolveTimeout = setTimeout(() => {
-        if (!isResolved && fsSync.existsSync(playlistPath)) {
+        const playlistTmpPath = playlistPath + '.tmp';
+        const actualPlaylistPath = fsSync.existsSync(playlistTmpPath) ? playlistTmpPath : playlistPath;
+        
+        if (!isResolved && fsSync.existsSync(actualPlaylistPath)) {
           isResolved = true;
           
           // Store the temp directory path for segment serving
@@ -1046,7 +1049,7 @@ class VideoService {
           });
           
           // Read initial playlist
-          const playlist = fsSync.readFileSync(playlistPath, 'utf8');
+          const playlist = fsSync.readFileSync(actualPlaylistPath, 'utf8');
           
           console.log(`[Native Live HLS] Early resolve with initial segments available`);
           
