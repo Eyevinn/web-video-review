@@ -1,0 +1,136 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-review-app
+  labels:
+    app: video-review
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: video-review
+  template:
+    metadata:
+      labels:
+        app: video-review
+    spec:
+      containers:
+      - name: video-review
+        image: your-registry/video-review:latest
+        ports:
+        - containerPort: 3001
+        env:
+        # AWS Configuration
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: access-key-id
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: secret-access-key
+        - name: AWS_REGION
+          value: "us-east-1"
+        - name: S3_BUCKET
+          value: "your-video-bucket"
+        
+        # Application Settings - Memory Optimized
+        - name: LOCAL_CACHE_DIR
+          value: "/data"
+        - name: MAX_LOCAL_CACHE_SIZE
+          value: "536870912"  # 512MB for K8s pods
+        - name: ENABLE_LOCAL_CACHE
+          value: "true"
+        - name: DEBUG
+          value: "false"
+        
+        # FFmpeg Memory Optimization Settings
+        - name: FFMPEG_THREADS
+          value: "2"
+        - name: FFMPEG_PRESET
+          value: "veryfast"
+        - name: FFMPEG_CRF
+          value: "25"
+        - name: FFMPEG_BUFSIZE
+          value: "1M"
+        - name: FFMPEG_MAXRATE
+          value: "1000k"
+        
+        # Node.js Memory Settings
+        - name: NODE_OPTIONS
+          value: "--max-old-space-size=1536"
+        
+        resources:
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+        
+        volumeMounts:
+        - name: video-cache
+          mountPath: /data
+        
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3001
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3001
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+      
+      volumes:
+      - name: video-cache
+        persistentVolumeClaim:
+          claimName: video-cache-pvc
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: video-cache-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: gp2  # Adjust for your cloud provider
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: video-review-service
+spec:
+  selector:
+    app: video-review
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 3001
+  type: LoadBalancer
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aws-credentials
+type: Opaque
+data:
+  # Base64 encoded AWS credentials
+  access-key-id: <base64-encoded-access-key>
+  secret-access-key: <base64-encoded-secret-key>

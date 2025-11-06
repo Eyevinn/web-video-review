@@ -18,13 +18,19 @@ services:
       - AWS_REGION=${AWS_REGION:-us-east-1}
       - S3_BUCKET=${S3_BUCKET}
       # Application settings
-      - LOCAL_CACHE_DIR=/tmp/videoreview
-      - MAX_LOCAL_CACHE_SIZE=10737418240
+      - LOCAL_CACHE_DIR=/data
+      - MAX_LOCAL_CACHE_SIZE=1073741824  # 1GB for container environments
       - ENABLE_LOCAL_CACHE=true
       - DEBUG=${DEBUG:-false}  # Set to 'true' to enable verbose debug logging
+      # FFmpeg memory optimization settings
+      - FFMPEG_THREADS=${FFMPEG_THREADS:-2}
+      - FFMPEG_PRESET=${FFMPEG_PRESET:-veryfast}
+      - FFMPEG_CRF=${FFMPEG_CRF:-25}
+      - FFMPEG_BUFSIZE=${FFMPEG_BUFSIZE:-1M}
+      - FFMPEG_MAXRATE=${FFMPEG_MAXRATE:-1000k}
     volumes:
       # Mount volume for temporary video files and cache
-      - video_cache:/tmp/videoreview
+      - video_cache:/data
       # Optional: mount for logs
       - ./logs:/app/logs
     networks:

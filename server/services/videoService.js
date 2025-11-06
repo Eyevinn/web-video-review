@@ -83,13 +83,17 @@ class VideoService {
     //   };
     // }
     
-    // Fallback to software encoding
+    // Fallback to software encoding with memory optimizations
     return {
-      type: 'software',
+      type: 'software-lowmem',
       encoder: 'libx264',
-      preset: '-preset fast',
-      quality: '-crf 23',
-      rateControl: ''
+      preset: process.env.FFMPEG_PRESET || '-preset veryfast',
+      quality: process.env.FFMPEG_CRF || '-crf 25',
+      rateControl: '',
+      threads: Math.min(parseInt(process.env.FFMPEG_THREADS || '2'), os.cpus().length),
+      x264opts: 'sliced-threads:ref=1:bframes=0:me=dia:subme=1:trellis=0',
+      bufsize: process.env.FFMPEG_BUFSIZE || '1M',
+      maxrate: process.env.FFMPEG_MAXRATE || '1000k'
     };
   }
 
@@ -579,13 +583,19 @@ class VideoService {
       '-c:v', 'libx264'  // Force software encoding for video filters
     ];
 
-    // Use software encoding settings for timecode overlay compatibility
-    ffmpegArgs.push('-preset', 'fast', '-crf', '23');
+    // Use memory-optimized software encoding settings for timecode overlay compatibility
+    const hwAccelConfig = this.hwAccel;
+    ffmpegArgs.push(
+      '-preset', hwAccelConfig.preset.replace('-preset ', ''),
+      '-tune', 'zerolatency',
+      '-crf', hwAccelConfig.quality.replace('-crf ', '')
+    );
     
     ffmpegArgs.push(
-      '-b:v', '1500k',
-      '-maxrate', '1500k',
-      '-bufsize', '3M',
+      '-b:v', '1000k',
+      '-maxrate', hwAccelConfig.maxrate,
+      '-bufsize', hwAccelConfig.bufsize,
+      '-x264opts', hwAccelConfig.x264opts,
       '-vf', `setpts=PTS-STARTPTS,drawtext=text='%{pts\\:hms}':fontsize=24:fontcolor=white:box=1:boxcolor=black@0.8:x=w-tw-10:y=h-th-10`,
       '-r', '25',
       '-s', '1280x720',
@@ -596,7 +606,9 @@ class VideoService {
       '-movflags', 'frag_keyframe+empty_moov+faststart',
       '-f', 'mp4',
       '-avoid_negative_ts', 'make_zero',
-      '-threads', '0',
+      '-threads', hwAccelConfig.threads.toString(),
+      '-max_muxing_queue_size', '128',
+      '-fflags', '+flush_packets',
       'pipe:1'
     );
 
@@ -945,13 +957,19 @@ class VideoService {
         '-vsync', 'cfr',
       );
     } else {
-      // Fallback to software encoding
+      // Fallback to memory-optimized software encoding
+      const hwAccelConfig = this.hwAccel;
       ffmpegArgs.push(
         '-c:v', 'libx264',
-        '-preset', 'fast',
-        '-crf', '23',
-        '-maxrate', '2000k',
-        '-bufsize', '4000k',
+        '-preset', hwAccelConfig.preset.replace('-preset ', ''),
+        '-tune', 'zerolatency',
+        '-crf', hwAccelConfig.quality.replace('-crf ', ''),
+        '-x264opts', hwAccelConfig.x264opts,
+        '-maxrate', hwAccelConfig.maxrate,
+        '-bufsize', hwAccelConfig.bufsize,
+        '-threads', hwAccelConfig.threads.toString(),
+        '-max_muxing_queue_size', '128',
+        '-fflags', '+flush_packets',
         '-r', '25',
         '-pix_fmt', 'yuv420p',
         '-profile:v', 'high',
