@@ -131,14 +131,18 @@ router.get('/:key/playlist.m3u8', async (req, res) => {
       cacheEntry = videoService.nativeHlsCache.get(key);
       
       const playlistPath = path.join(cacheEntry.tempDir, 'playlist.m3u8');
+      const playlistTmpPath = path.join(cacheEntry.tempDir, 'playlist.m3u8.tmp');
       
-      if (require('fs').existsSync(playlistPath)) {
+      // Check for .tmp file first, then fall back to main playlist
+      const actualPlaylistPath = require('fs').existsSync(playlistTmpPath) ? playlistTmpPath : playlistPath;
+      
+      if (require('fs').existsSync(actualPlaylistPath)) {
         // Wait for segments before serving the playlist
         await waitForInitialSegments(cacheEntry.tempDir, 2, 30000);
         
         // Read the updated playlist after waiting for segments
-        playlist = require('fs').readFileSync(playlistPath, 'utf8');
-        console.log(`Serving updated playlist for ${key} from ${playlistPath}`);
+        playlist = require('fs').readFileSync(actualPlaylistPath, 'utf8');
+        console.log(`Serving updated playlist for ${key} from ${actualPlaylistPath}`);
       }
     }
     
@@ -154,9 +158,14 @@ router.get('/:key/playlist.m3u8', async (req, res) => {
         
         // Read the updated playlist after segments are available
         const playlistPath = path.join(newCacheEntry.tempDir, 'playlist.m3u8');
-        if (require('fs').existsSync(playlistPath)) {
-          playlist = require('fs').readFileSync(playlistPath, 'utf8');
-          console.log(`Serving initial playlist for ${key} with segments available`);
+        const playlistTmpPath = path.join(newCacheEntry.tempDir, 'playlist.m3u8.tmp');
+        
+        // Check for .tmp file first, then fall back to main playlist
+        const actualPlaylistPath = require('fs').existsSync(playlistTmpPath) ? playlistTmpPath : playlistPath;
+        
+        if (require('fs').existsSync(actualPlaylistPath)) {
+          playlist = require('fs').readFileSync(actualPlaylistPath, 'utf8');
+          console.log(`Serving initial playlist for ${key} with segments available from ${actualPlaylistPath}`);
         }
       }
     }
