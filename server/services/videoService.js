@@ -703,6 +703,14 @@ class VideoService {
     const segmentPattern = path.join(tempDir, 'segment%03d.ts');
     const thumbnailPattern = path.join(tempDir, 'thumb%03d.jpg');
     
+    // Clean up any lingering .tmp files from previous FFmpeg runs
+    try {
+      await fs.rm(playlistPath + '.tmp', { force: true });
+      this.debugLog(`[Native Live HLS] Cleaned up existing ${playlistPath}.tmp`);
+    } catch (error) {
+      // Ignore errors if file doesn't exist
+    }
+    
     // Get input source - use streaming approach for better performance
     let inputSource;
     let useStreamingMode = false;
