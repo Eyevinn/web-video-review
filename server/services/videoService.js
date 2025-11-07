@@ -29,7 +29,7 @@ class VideoService {
     this.localCacheDir = process.env.LOCAL_CACHE_DIR || '/tmp/videoreview';
     this.maxLocalCacheSize = parseInt(process.env.MAX_LOCAL_CACHE_SIZE) || 10 * 1024 * 1024 * 1024; // 10GB default
     this.enableLocalCache = process.env.ENABLE_LOCAL_CACHE !== 'false'; // Enable by default
-    this.debugLogging = process.env.DEBUG === 'true' || process.env.NODE_ENV === 'development'; // Debug logging control
+    this.debugLogging = process.env.DEBUG === 'true' || process.env.NODE_ENV === 'development' || process.env.DEBUG_MEMORY === 'true'; // Debug logging control
     
     // Create cache directory if it doesn't exist
     this.initializeCacheDirectory();
@@ -112,11 +112,19 @@ class VideoService {
   async updateProcessMemoryStats() {
     const memoryStats = new Map();
     
+    if (this.debugLogging) {
+      console.log(`[Memory Monitor] Checking ${this.activeProcesses.size} active processes`);
+    }
+    
     for (const [key, processEntry] of this.activeProcesses) {
       // Handle both new structure {promise, info} and legacy direct info
       const processInfo = processEntry.info || processEntry;
       
       if (processInfo && processInfo.pid) {
+        if (this.debugLogging) {
+          console.log(`[Memory Monitor] Checking PID ${processInfo.pid} for ${processInfo.type}`);
+        }
+        
         try {
           const memoryUsage = await this.getProcessMemory(processInfo.pid);
           if (memoryUsage) {
@@ -127,19 +135,105 @@ class VideoService {
               startTime: processInfo.startTime,
               videoKey: key.split('-')[0] // Extract video key from composite key
             });
+            
+            if (this.debugLogging) {
+              console.log(`[Memory Monitor] PID ${processInfo.pid}: ${this.formatBytes(memoryUsage.rss)} RSS, ${memoryUsage.cpu.toFixed(1)}% CPU`);
+            }
+          } else {
+            if (this.debugLogging) {
+              console.log(`[Memory Monitor] No memory data for PID ${processInfo.pid}`);
+            }
           }
         } catch (error) {
           // Process might have ended, remove from active processes
           console.log(`Process ${processInfo.pid} no longer exists, removing from monitoring`);
           this.activeProcesses.delete(key);
         }
+      } else if (this.debugLogging) {
+        console.log(`[Memory Monitor] Skipping entry ${key}: no PID available`);
       }
     }
     
     this.processMemoryStats = memoryStats;
+    
+    if (this.debugLogging) {
+      console.log(`[Memory Monitor] Updated stats for ${memoryStats.size} processes`);
+    }
   }
 
   async getProcessMemory(pid) {
+    try {
+      // First try reading from /proc filesystem (works in most Linux containers)
+      if (await this.tryProcMemory(pid)) {
+        return await this.tryProcMemory(pid);
+      }
+      
+      // Fallback to ps command
+      return await this.tryPsMemory(pid);
+    } catch (error) {
+      console.log(`Failed to get memory for PID ${pid}:`, error.message);
+      return null;
+    }
+  }
+
+  async tryProcMemory(pid) {
+    try {
+      const fs = require('fs').promises;
+      
+      // Read /proc/[pid]/status for detailed memory info
+      const statusPath = `/proc/${pid}/status`;
+      const statPath = `/proc/${pid}/stat`;
+      
+      const [statusData, statData] = await Promise.all([
+        fs.readFile(statusPath, 'utf8').catch(() => null),
+        fs.readFile(statPath, 'utf8').catch(() => null)
+      ]);
+      
+      if (!statusData || !statData) {
+        return null;
+      }
+      
+      // Parse memory info from /proc/[pid]/status
+      const memoryInfo = {};
+      statusData.split('\n').forEach(line => {
+        if (line.startsWith('VmRSS:')) {
+          memoryInfo.rss = parseInt(line.split(':')[1].trim().split(' ')[0]) * 1024; // Convert KB to bytes
+        }
+        if (line.startsWith('VmSize:')) {
+          memoryInfo.vsz = parseInt(line.split(':')[1].trim().split(' ')[0]) * 1024; // Convert KB to bytes
+        }
+      });
+      
+      // Parse CPU info from /proc/[pid]/stat
+      const statFields = statData.split(' ');
+      const utime = parseInt(statFields[13]) || 0; // User time
+      const stime = parseInt(statFields[14]) || 0; // System time
+      const starttime = parseInt(statFields[21]) || 0; // Start time
+      
+      // Calculate CPU percentage (simplified)
+      const totalTime = utime + stime;
+      const uptime = Date.now() / 1000 - (starttime / 100); // Rough uptime calculation
+      const cpuPercent = uptime > 0 ? (totalTime / 100) / uptime * 100 : 0;
+      
+      // Format elapsed time
+      const elapsed = this.formatElapsedTime(uptime);
+      
+      if (memoryInfo.rss && memoryInfo.vsz) {
+        return {
+          rss: memoryInfo.rss,
+          vsz: memoryInfo.vsz,
+          cpu: Math.min(100, Math.max(0, cpuPercent)), // Clamp between 0-100
+          elapsed: elapsed
+        };
+      }
+      
+      return null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async tryPsMemory(pid) {
     return new Promise((resolve) => {
       const { spawn } = require('child_process');
       
@@ -160,8 +254,8 @@ class VideoService {
               resolve({
                 rss: parseInt(stats[0]) * 1024, // RSS in bytes (ps returns KB)
                 vsz: parseInt(stats[1]) * 1024, // VSZ in bytes (ps returns KB)
-                cpu: parseFloat(stats[2]), // CPU percentage
-                elapsed: stats[3] // Elapsed time
+                cpu: parseFloat(stats[2]) || 0, // CPU percentage
+                elapsed: stats[3] || 'N/A' // Elapsed time
               });
             } else {
               resolve(null);
@@ -211,6 +305,20 @@ class VideoService {
         resolve(null);
       }
     });
+  }
+
+  formatElapsedTime(seconds) {
+    if (!seconds || seconds < 0) return 'N/A';
+    
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    
+    if (hours > 0) {
+      return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    } else {
+      return `${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
   }
 
   getMemoryStats() {
@@ -1217,6 +1325,7 @@ class VideoService {
       // Store process PID for memory monitoring
       if (processInfo) {
         processInfo.pid = ffmpeg.pid;
+        console.log(`[Memory Monitor] FFmpeg HLS process started with PID: ${ffmpeg.pid}`);
       }
       
       let stderr = '';
@@ -2194,6 +2303,7 @@ class VideoService {
         // Store process PID for memory monitoring
         if (processInfo) {
           processInfo.pid = ffmpeg.pid;
+          console.log(`[Memory Monitor] FFmpeg EBU R128 process started with PID: ${ffmpeg.pid}`);
         }
         
         let stderrOutput = '';
