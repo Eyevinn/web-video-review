@@ -12,12 +12,18 @@ const EbuR128Monitor = ({ videoKey, currentTime, isPlaying, className = '' }) =>
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [isFirstLoad, setIsFirstLoad] = useState(true);
+  const [hasStartedPlaying, setHasStartedPlaying] = useState(false);
   const currentTimeRef = useRef(currentTime);
 
   // Update ref when currentTime changes
   useEffect(() => {
     currentTimeRef.current = currentTime;
   }, [currentTime]);
+
+  // Reset hasStartedPlaying when video changes
+  useEffect(() => {
+    setHasStartedPlaying(false);
+  }, [videoKey]);
 
   // Stable fetch function using ref for current time
   const fetchMeasurements = useCallback(async () => {
@@ -52,6 +58,13 @@ const EbuR128Monitor = ({ videoKey, currentTime, isPlaying, className = '' }) =>
     }
   }, [videoKey, isPlaying, isFirstLoad, measurements.integrated, measurements.range]);
 
+  // Track when playback has started
+  useEffect(() => {
+    if (isPlaying && !hasStartedPlaying) {
+      setHasStartedPlaying(true);
+    }
+  }, [isPlaying, hasStartedPlaying]);
+
   // Update measurements every 5 seconds when playing
   useEffect(() => {
     if (!isPlaying) {
@@ -81,6 +94,11 @@ const EbuR128Monitor = ({ videoKey, currentTime, isPlaying, className = '' }) =>
     if (integrated >= -26 && integrated <= -20) return '#FF9800'; // Orange - acceptable
     return '#F44336'; // Red - non-compliant
   };
+
+  // Hide monitor until playback has started
+  if (!hasStartedPlaying) {
+    return null;
+  }
 
   return (
     <div className={`ebu-r128-monitor ${className}`} style={{
