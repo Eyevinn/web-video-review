@@ -232,6 +232,7 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
         
         let userCurrentTime = 0;
         let preventSeek = false;
+        let isInitialLoad = true;
         
         hls.on(Hls.Events.LEVEL_LOADING, (event, data) => {
           // Store current time BEFORE playlist loading starts
@@ -239,6 +240,7 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
           if (video && !seeking && video.currentTime > 0) {
             userCurrentTime = video.currentTime;
             preventSeek = true;
+            isInitialLoad = false; // No longer initial load once we have playback position
             console.log('Level loading, storing position:', userCurrentTime);
           }
         });
@@ -246,7 +248,7 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
         hls.on(Hls.Events.LEVEL_LOADED, (event, data) => {
           // Keep the prevention active after level loads
           const video = videoRef.current;
-          if (video && preventSeek && userCurrentTime > 0) {
+          if (video && preventSeek && userCurrentTime > 0 && !isInitialLoad) {
             console.log('Level loaded, maintaining stored position:', userCurrentTime);
             
             // Check if the level loaded is updating the playlist (live edge behavior)
@@ -264,12 +266,15 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
               preventSeek = false;
               console.log('Re-enabling seeks after level update');
             }, 1500);
+          } else if (isInitialLoad && data.details && data.details.live) {
+            console.log('Initial live playlist load, allowing natural position');
+            isInitialLoad = false; // Mark as no longer initial load
           }
         });
         
         // Prevent unwanted seeking using timeupdate event
         video.addEventListener('timeupdate', () => {
-          if (preventSeek && userCurrentTime > 0 && !seeking) {
+          if (preventSeek && userCurrentTime > 0 && !seeking && !isInitialLoad) {
             const currentTime = video.currentTime;
             // More sensitive detection for playlist updates (2 seconds instead of 5)
             if (Math.abs(currentTime - userCurrentTime) > 2) {
@@ -281,7 +286,7 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
         
         // Also listen for seeking events
         video.addEventListener('seeking', () => {
-          if (preventSeek && userCurrentTime > 0 && !seeking) {
+          if (preventSeek && userCurrentTime > 0 && !seeking && !isInitialLoad) {
             const targetTime = video.currentTime;
             // More sensitive detection for playlist updates (2 seconds instead of 5)
             if (Math.abs(targetTime - userCurrentTime) > 2) {
