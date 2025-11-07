@@ -299,8 +299,22 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
             
             // Wait for expectedFragments before allowing playback (adaptive for short videos)
             if (newCount >= expectedFragments && isBuffering) {
-              setIsBuffering(false);
               console.log(`Buffering complete: ${newCount}/${expectedFragments} fragments loaded`);
+              // Store current position before changing buffering state to prevent seek
+              const video = videoRef.current;
+              if (video && !seeking) {
+                const currentPos = video.currentTime;
+                setIsBuffering(false);
+                // Ensure position hasn't changed after state update
+                setTimeout(() => {
+                  if (video.currentTime !== currentPos) {
+                    console.log('Correcting position after buffering complete:', currentPos);
+                    video.currentTime = currentPos;
+                  }
+                }, 0);
+              } else {
+                setIsBuffering(false);
+              }
             }
             
             return newCount;
@@ -423,13 +437,13 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
   };
 
   useEffect(() => {
-    if (!videoRef.current || !seeking) return;
+    if (!videoRef.current || !seeking || isBuffering) return;
     
     const video = videoRef.current;
     if (Math.abs(video.currentTime - currentTime) > 1) {
       video.currentTime = currentTime;
     }
-  }, [currentTime, seeking]);
+  }, [currentTime, seeking, isBuffering]);
 
   useEffect(() => {
     const video = videoRef.current;
