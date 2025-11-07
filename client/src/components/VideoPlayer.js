@@ -202,7 +202,10 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
           maxStarvationDelay: 25, // Extended starvation delay for MXF files
           maxLoadingDelay: 25, // Extended loading delay for MXF files
           startPosition: 0, // Start from beginning instead of live edge
-          autoStartLoad: false // Prevent auto-seeking to live edge
+          autoStartLoad: false, // Prevent auto-seeking to live edge
+          forceKeyFrameOnDiscontinuity: true, // Better seeking behavior
+          liveDurationInfinity: false, // Disable infinite live duration
+          liveBackBufferLength: 0 // No back buffer for live streams
         });
         
         hlsRef.current = hls;
@@ -213,9 +216,24 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
         hls.loadSource(playlistUrl);
         hls.attachMedia(video);
         
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          // Manually start loading from beginning
+        hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+          // Force start from beginning, not live edge
           hls.startLoad(0);
+          
+          // If this is detected as a live stream, force seek to beginning
+          if (data.levels && data.levels.length > 0 && data.levels[0].details?.live) {
+            console.log('Live stream detected, forcing start position to 0');
+            // Set up one-time listener to correct position after video loads
+            const handleLoadedData = () => {
+              const video = videoRef.current;
+              if (video && video.currentTime > 5) { // If player jumped to live edge
+                console.log('Correcting live edge jump on loadeddata, seeking to start');
+                video.currentTime = 0;
+              }
+              video.removeEventListener('loadeddata', handleLoadedData);
+            };
+            video.addEventListener('loadeddata', handleLoadedData, { once: true });
+          }
           
           // Initialize audio track detection
           detectAudioTracks();
