@@ -866,14 +866,14 @@ class VideoService {
     
     // EBU R128 is now handled separately - no video overlay needed
     
-    // Build video filter chain with overlays
+    // Build video filter chain with overlays - scale down early to reduce memory usage
     if (showGoniometer && hasAudio) {
-      let baseVideo = `[${videoInputForFilter}]split=2[v1][v2];[v1]setpts=PTS-STARTPTS,scale=1280:720[v1scaled]`;
-      baseVideo += `;[gonio]scale=300:300[goniosized];[v1scaled][goniosized]overlay=w-w-20:h-h-50[v1final]`;
+      let baseVideo = `[${videoInputForFilter}]setpts=PTS-STARTPTS,scale=1280:720,split=2[v1][v2]`;
+      baseVideo += `;[gonio]scale=300:300[goniosized];[v1][goniosized]overlay=w-w-20:h-h-50[v1final]`;
       videoFilterChain = baseVideo + `;[v1final]drawtext=text='%{pts\\:hms}':fontsize=24:fontcolor=white:box=1:boxcolor=black@0.8:x=w-tw-10:y=h-th-10[hls]`;
     } else {
       // No overlays for videos without audio or when disabled
-      videoFilterChain = `[${videoInputForFilter}]split=2[v1][v2];[v1]setpts=PTS-STARTPTS,scale=1280:720,drawtext=text='%{pts\\:hms}':fontsize=24:fontcolor=white:box=1:boxcolor=black@0.8:x=w-tw-10:y=h-th-10[hls]`;
+      videoFilterChain = `[${videoInputForFilter}]setpts=PTS-STARTPTS,scale=1280:720,split=2[v1][v2];[v1]drawtext=text='%{pts\\:hms}':fontsize=24:fontcolor=white:box=1:boxcolor=black@0.8:x=w-tw-10:y=h-th-10[hls]`;
     }
     
     const filterComplex = [
