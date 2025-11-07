@@ -41,6 +41,10 @@ class VideoService {
     
     console.log(`Platform: ${this.platform} ${this.arch}`);
     console.log(`Hardware acceleration: ${this.hwAccel.type || 'software only'}`);
+    
+    // Memory monitoring for FFmpeg processes
+    this.processMemoryStats = new Map(); // Track memory usage per process
+    this.startMemoryMonitoring();
   }
 
   detectHardwareAcceleration() {
@@ -95,6 +99,145 @@ class VideoService {
       bufsize: process.env.FFMPEG_BUFSIZE || '1M',
       maxrate: process.env.FFMPEG_MAXRATE || '1000k'
     };
+  }
+
+  // Memory monitoring for FFmpeg processes
+  startMemoryMonitoring() {
+    // Monitor memory every 5 seconds
+    setInterval(() => {
+      this.updateProcessMemoryStats();
+    }, 5000);
+  }
+
+  async updateProcessMemoryStats() {
+    const memoryStats = new Map();
+    
+    for (const [key, processInfo] of this.activeProcesses) {
+      if (processInfo.pid) {
+        try {
+          const memoryUsage = await this.getProcessMemory(processInfo.pid);
+          if (memoryUsage) {
+            memoryStats.set(key, {
+              type: processInfo.type,
+              pid: processInfo.pid,
+              memory: memoryUsage,
+              startTime: processInfo.startTime,
+              videoKey: key.split('-')[0] // Extract video key from composite key
+            });
+          }
+        } catch (error) {
+          // Process might have ended, remove from active processes
+          console.log(`Process ${processInfo.pid} no longer exists, removing from monitoring`);
+          this.activeProcesses.delete(key);
+        }
+      }
+    }
+    
+    this.processMemoryStats = memoryStats;
+  }
+
+  async getProcessMemory(pid) {
+    return new Promise((resolve) => {
+      const { spawn } = require('child_process');
+      
+      if (this.platform === 'darwin' || this.platform === 'linux') {
+        // Use ps command on Unix-like systems
+        const ps = spawn('ps', ['-o', 'rss,vsz,pcpu,etime', '-p', pid.toString()]);
+        let output = '';
+        
+        ps.stdout.on('data', (data) => {
+          output += data.toString();
+        });
+        
+        ps.on('close', (code) => {
+          if (code === 0) {
+            const lines = output.trim().split('\n');
+            if (lines.length >= 2) {
+              const stats = lines[1].trim().split(/\s+/);
+              resolve({
+                rss: parseInt(stats[0]) * 1024, // RSS in bytes (ps returns KB)
+                vsz: parseInt(stats[1]) * 1024, // VSZ in bytes (ps returns KB)
+                cpu: parseFloat(stats[2]), // CPU percentage
+                elapsed: stats[3] // Elapsed time
+              });
+            } else {
+              resolve(null);
+            }
+          } else {
+            resolve(null);
+          }
+        });
+        
+        ps.on('error', () => resolve(null));
+      } else if (this.platform === 'win32') {
+        // Use tasklist on Windows
+        const tasklist = spawn('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV']);
+        let output = '';
+        
+        tasklist.stdout.on('data', (data) => {
+          output += data.toString();
+        });
+        
+        tasklist.on('close', (code) => {
+          if (code === 0) {
+            const lines = output.trim().split('\n');
+            if (lines.length >= 2) {
+              const stats = lines[1].split(',');
+              if (stats.length >= 5) {
+                const memoryStr = stats[4].replace(/"/g, '').replace(/,/g, '');
+                const memoryKB = parseInt(memoryStr);
+                resolve({
+                  rss: memoryKB * 1024, // Convert KB to bytes
+                  vsz: memoryKB * 1024,
+                  cpu: 0, // CPU not available from tasklist
+                  elapsed: 'N/A'
+                });
+              } else {
+                resolve(null);
+              }
+            } else {
+              resolve(null);
+            }
+          } else {
+            resolve(null);
+          }
+        });
+        
+        tasklist.on('error', () => resolve(null));
+      } else {
+        resolve(null);
+      }
+    });
+  }
+
+  getMemoryStats() {
+    const stats = [];
+    for (const [key, stat] of this.processMemoryStats) {
+      stats.push({
+        key,
+        type: stat.type,
+        pid: stat.pid,
+        videoKey: stat.videoKey,
+        memory: {
+          rss: stat.memory.rss,
+          vsz: stat.memory.vsz,
+          rssFormatted: this.formatBytes(stat.memory.rss),
+          vszFormatted: this.formatBytes(stat.memory.vsz),
+        },
+        cpu: stat.memory.cpu,
+        elapsed: stat.memory.elapsed,
+        startTime: stat.startTime
+      });
+    }
+    return stats.sort((a, b) => b.memory.rss - a.memory.rss); // Sort by memory usage
+  }
+
+  formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 
   initializeCacheDirectory() {
@@ -680,8 +823,14 @@ class VideoService {
     
     console.log(`Starting FFmpeg native live HLS generation for ${s3Key} with ${segmentDuration}s segments${showGoniometer ? ' (with goniometer overlay)' : ''}`);
     
-    const processPromise = this._generateNativeLiveHLSInternal(s3Key, segmentDuration, options);
-    this.activeProcesses.set(cacheKey, processPromise);
+    const processInfo = {
+      type: 'HLS Generation',
+      startTime: Date.now(),
+      pid: null
+    };
+    this.activeProcesses.set(cacheKey, processInfo);
+    
+    const processPromise = this._generateNativeLiveHLSInternal(s3Key, segmentDuration, options, processInfo);
     
     try {
       const result = await processPromise;
@@ -692,7 +841,7 @@ class VideoService {
     }
   }
 
-  async _generateNativeLiveHLSInternal(s3Key, segmentDuration = 10, options = {}) {
+  async _generateNativeLiveHLSInternal(s3Key, segmentDuration = 10, options = {}, processInfo = null) {
     const { showGoniometer = true, showEbuR128 = false } = options;
     // Get video info for duration calculation
     const videoInfo = await this.getVideoInfo(s3Key);
@@ -1055,6 +1204,11 @@ class VideoService {
     
     return new Promise((resolve, reject) => {
       const ffmpeg = spawn('ffmpeg', ffmpegArgs);
+      
+      // Store process PID for memory monitoring
+      if (processInfo) {
+        processInfo.pid = ffmpeg.pid;
+      }
       
       let stderr = '';
       let isResolved = false;
@@ -1940,8 +2094,14 @@ class VideoService {
       return this.activeProcesses.get(cacheKey);
     }
     
-    const analysisPromise = this._getEbuR128AnalysisInternal(s3Key, startTime, duration);
-    this.activeProcesses.set(cacheKey, analysisPromise);
+    const processInfo = {
+      type: 'EBU R128 Analysis',
+      startTime: Date.now(),
+      pid: null
+    };
+    this.activeProcesses.set(cacheKey, processInfo);
+    
+    const analysisPromise = this._getEbuR128AnalysisInternal(s3Key, startTime, duration, processInfo);
     
     try {
       const result = await analysisPromise;
@@ -1951,7 +2111,7 @@ class VideoService {
     }
   }
 
-  async _getEbuR128AnalysisInternal(s3Key, startTime = 0, duration = 10) {
+  async _getEbuR128AnalysisInternal(s3Key, startTime = 0, duration = 10, processInfo = null) {
     try {
       const videoInfo = await this.getVideoInfo(s3Key);
       const hasAudio = videoInfo.audio !== null;
@@ -2015,6 +2175,12 @@ class VideoService {
 
       return new Promise((resolve, reject) => {
         const ffmpeg = spawn('ffmpeg', ffmpegArgs);
+        
+        // Store process PID for memory monitoring
+        if (processInfo) {
+          processInfo.pid = ffmpeg.pid;
+        }
+        
         let stderrOutput = '';
 
         ffmpeg.stderr.on('data', (data) => {

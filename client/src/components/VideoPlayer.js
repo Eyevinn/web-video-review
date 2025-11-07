@@ -3,6 +3,7 @@ import Hls from 'hls.js';
 import api from '../services/api';
 import VideoProgressBar from './VideoProgressBar';
 import EbuR128Monitor from './EbuR128Monitor';
+import MemoryMonitor from './MemoryMonitor';
 
 function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, onActiveAudioStreamChange, onSwitchAudioTrackRef }) {
   const videoRef = useRef(null);
@@ -709,6 +710,8 @@ function VideoPlayer({ videoKey, videoInfo, currentTime, onTimeUpdate, seeking, 
           currentTime={currentTime}
           isPlaying={isPlaying}
         />
+        
+        <MemoryMonitor collapsed={true} />
       </div>
       
       <div className="video-controls" style={{ 

@@ -484,4 +484,19 @@ router.post('/:key/abort', async (req, res) => {
   }
 });
 
+// Get memory statistics for FFmpeg processes
+router.get('/memory-stats', (req, res) => {
+  try {
+    const memoryStats = videoService.getMemoryStats();
+    res.json({
+      processes: memoryStats,
+      totalProcesses: memoryStats.length,
+      timestamp: Date.now()
+    });
+  } catch (error) {
+    console.error('Error getting memory statistics:', error);
+    res.status(500).json({ error: 'Failed to get memory statistics' });
+  }
+});
+
 module.exports = router;
