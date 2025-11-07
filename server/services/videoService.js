@@ -91,7 +91,7 @@ class VideoService {
       quality: process.env.FFMPEG_CRF || '-crf 25',
       rateControl: '',
       threads: Math.min(parseInt(process.env.FFMPEG_THREADS || '2'), os.cpus().length),
-      x264opts: 'sliced-threads:ref=1:bframes=0:me=dia:subme=1:trellis=0',
+      x264opts: `sliced-threads=0:ref=1:bframes=0:me=dia:subme=1:trellis=0:threads=${Math.min(parseInt(process.env.FFMPEG_THREADS || '2'), os.cpus().length)}`,
       bufsize: process.env.FFMPEG_BUFSIZE || '1M',
       maxrate: process.env.FFMPEG_MAXRATE || '1000k'
     };
