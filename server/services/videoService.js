@@ -112,8 +112,11 @@ class VideoService {
   async updateProcessMemoryStats() {
     const memoryStats = new Map();
     
-    for (const [key, processInfo] of this.activeProcesses) {
-      if (processInfo.pid) {
+    for (const [key, processEntry] of this.activeProcesses) {
+      // Handle both new structure {promise, info} and legacy direct info
+      const processInfo = processEntry.info || processEntry;
+      
+      if (processInfo && processInfo.pid) {
         try {
           const memoryUsage = await this.getProcessMemory(processInfo.pid);
           if (memoryUsage) {
@@ -788,7 +791,8 @@ class VideoService {
     
     // Check if native HLS is already being generated
     if (this.activeProcesses.has(cacheKey)) {
-      return this.activeProcesses.get(cacheKey);
+      const activeProcess = this.activeProcesses.get(cacheKey);
+      return activeProcess.promise || activeProcess; // Handle both new format and legacy
     }
     
     // Check if HLS generation is already in progress for this asset (regardless of options)
@@ -828,9 +832,14 @@ class VideoService {
       startTime: Date.now(),
       pid: null
     };
-    this.activeProcesses.set(cacheKey, processInfo);
     
     const processPromise = this._generateNativeLiveHLSInternal(s3Key, segmentDuration, options, processInfo);
+    
+    // Store both process info and promise for dual access
+    this.activeProcesses.set(cacheKey, {
+      promise: processPromise,
+      info: processInfo
+    });
     
     try {
       const result = await processPromise;
@@ -2091,7 +2100,8 @@ class VideoService {
     // Check if EBU R128 analysis is already being processed
     if (this.activeProcesses.has(cacheKey)) {
       console.log(`[EBU R128] Analysis already in progress for ${s3Key} (${startTime}s-${startTime + duration}s), returning existing promise`);
-      return this.activeProcesses.get(cacheKey);
+      const activeProcess = this.activeProcesses.get(cacheKey);
+      return activeProcess.promise || activeProcess; // Handle both new format and legacy
     }
     
     const processInfo = {
@@ -2099,9 +2109,14 @@ class VideoService {
       startTime: Date.now(),
       pid: null
     };
-    this.activeProcesses.set(cacheKey, processInfo);
     
     const analysisPromise = this._getEbuR128AnalysisInternal(s3Key, startTime, duration, processInfo);
+    
+    // Store both process info and promise for dual access
+    this.activeProcesses.set(cacheKey, {
+      promise: analysisPromise,
+      info: processInfo
+    });
     
     try {
       const result = await analysisPromise;
