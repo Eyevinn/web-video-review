@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import api from '../services/api';
 
 const EbuR128Monitor = ({ videoKey, currentTime, isPlaying, className = '' }) => {
@@ -12,6 +12,45 @@ const EbuR128Monitor = ({ videoKey, currentTime, isPlaying, className = '' }) =>
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [isFirstLoad, setIsFirstLoad] = useState(true);
+  const currentTimeRef = useRef(currentTime);
+
+  // Update ref when currentTime changes
+  useEffect(() => {
+    currentTimeRef.current = currentTime;
+  }, [currentTime]);
+
+  // Stable fetch function using ref for current time
+  const fetchMeasurements = useCallback(async () => {
+    if (!videoKey || !isPlaying) return;
+    
+    const shouldShowLoading = isFirstLoad || (measurements.integrated === null && measurements.range === null);
+    if (shouldShowLoading) {
+      setIsLoading(true);
+    }
+    setError(null);
+    
+    try {
+      // Use current time from ref minus 5 seconds for a 10-second window ending near current position
+      const currentVideoTime = currentTimeRef.current;
+      const startTime = Math.max(0, currentVideoTime - 5);
+      const duration = 10;
+      
+      console.log(`[EBU R128] Analyzing ${startTime.toFixed(1)}s - ${(startTime + duration).toFixed(1)}s (current: ${currentVideoTime.toFixed(1)}s)`);
+      
+      const result = await api.getEbuR128Analysis(videoKey, startTime, duration);
+      setMeasurements(result);
+      if (isFirstLoad) {
+        setIsFirstLoad(false);
+      }
+    } catch (err) {
+      console.error('Error fetching EBU R128 measurements:', err);
+      setError('Failed to analyze audio');
+    } finally {
+      if (shouldShowLoading) {
+        setIsLoading(false);
+      }
+    }
+  }, [videoKey, isPlaying, isFirstLoad, measurements.integrated, measurements.range]);
 
   // Update measurements every 5 seconds when playing
   useEffect(() => {
@@ -20,42 +59,14 @@ const EbuR128Monitor = ({ videoKey, currentTime, isPlaying, className = '' }) =>
       return;
     }
 
-    // Create a more stable fetch function that doesn't depend on currentTime changing
-    const fetchWithCurrentTime = async () => {
-      if (!videoKey || !isPlaying) return;
-      
-      const shouldShowLoading = isFirstLoad || (measurements.integrated === null && measurements.range === null);
-      if (shouldShowLoading) {
-        setIsLoading(true);
-      }
-      setError(null);
-      
-      try {
-        const startTime = Math.max(0, currentTime - 5);
-        const duration = 10;
-        
-        const result = await api.getEbuR128Analysis(videoKey, startTime, duration);
-        setMeasurements(result);
-        if (isFirstLoad) {
-          setIsFirstLoad(false);
-        }
-      } catch (err) {
-        console.error('Error fetching EBU R128 measurements:', err);
-        setError('Failed to analyze audio');
-      } finally {
-        if (shouldShowLoading) {
-          setIsLoading(false);
-        }
-      }
-    };
+    // Fetch immediately when playback starts
+    fetchMeasurements();
 
-    const interval = setInterval(fetchWithCurrentTime, 5000);
-    
-    // Initial fetch
-    fetchWithCurrentTime();
+    // Set up interval to fetch every 5 seconds
+    const interval = setInterval(fetchMeasurements, 5000);
 
     return () => clearInterval(interval);
-  }, [videoKey, isPlaying]); // Removed currentTime and other deps to prevent re-creation
+  }, [isPlaying, fetchMeasurements]);
 
   const formatValue = (value, unit = 'LUFS') => {
     if (value === null || value === undefined) return 'N/A';
