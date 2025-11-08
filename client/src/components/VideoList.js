@@ -17,7 +17,8 @@ function VideoList({ videos, selectedVideo, onVideoSelect, onRefresh, currentPat
   const handleItemClick = (item) => {
     if (item.type === 'folder') {
       onFolderNavigate && onFolderNavigate(item.key);
-    } else {
+    } else if (selectedVideo?.key !== item.key) {
+      // Only allow selecting if it's not the currently selected video
       onVideoSelect(item);
     }
   };
@@ -86,28 +87,34 @@ function VideoList({ videos, selectedVideo, onVideoSelect, onRefresh, currentPat
           </div>
         </div>
       ) : (
-        videos.map((item) => (
-          <div
-            key={item.key}
-            className={`video-item ${selectedVideo?.key === item.key ? 'selected' : ''} ${item.type === 'folder' ? 'folder-item' : ''}`}
-            onClick={() => handleItemClick(item)}
-            style={{
-              cursor: item.type === 'folder' ? 'pointer' : 'pointer',
-              backgroundColor: item.type === 'folder' ? '#1a2332' : undefined
-            }}
-          >
-            <div className="video-item-name">
-              <span style={{ marginRight: '0.5rem' }}>
-                {item.type === 'folder' ? '📁' : '🎬'}
-              </span>
-              {item.name}
+        videos.map((item) => {
+          const isSelected = selectedVideo?.key === item.key;
+          const isDisabled = item.type !== 'folder' && isSelected;
+          
+          return (
+            <div
+              key={item.key}
+              className={`video-item ${isSelected ? 'selected' : ''} ${item.type === 'folder' ? 'folder-item' : ''} ${isDisabled ? 'disabled' : ''}`}
+              onClick={() => handleItemClick(item)}
+              style={{
+                cursor: isDisabled ? 'not-allowed' : 'pointer',
+                opacity: isDisabled ? 0.6 : 1,
+                backgroundColor: item.type === 'folder' ? '#1a2332' : undefined
+              }}
+            >
+              <div className="video-item-name">
+                <span style={{ marginRight: '0.5rem' }}>
+                  {item.type === 'folder' ? '📁' : '🎬'}
+                </span>
+                {item.name}
+              </div>
+              <div className="video-item-info">
+                <div>{item.type === 'folder' ? 'Folder' : formatFileSize(item.size)}</div>
+                <div>{item.lastModified ? formatDate(item.lastModified) : ''}</div>
+              </div>
             </div>
-            <div className="video-item-info">
-              <div>{item.type === 'folder' ? 'Folder' : formatFileSize(item.size)}</div>
-              <div>{item.lastModified ? formatDate(item.lastModified) : ''}</div>
-            </div>
-          </div>
-        ))
+          );
+        })
       )}
     </div>
   );
