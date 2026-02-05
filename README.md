@@ -2,6 +2,19 @@
 
 A professional web application for reviewing broadcast video files stored in S3-compatible buckets. Features real-time video streaming with FFmpeg-powered transcoding, timeline navigation, and comprehensive video analysis tools.
 
+---
+<div align="center">
+
+## Quick Demo: Open Source Cloud
+
+Run this service in the cloud with a single click.
+
+[![Badge OSC](https://img.shields.io/badge/Try%20it%20out!-1E3A8A?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMTIiIGZpbGw9InVybCgjcGFpbnQwX2xpbmVhcl8yODIxXzMxNjcyKSIvPgo8Y2lyY2xlIGN4PSIxMiIgY3k9IjEyIiByPSI3IiBzdHJva2U9ImJsYWNrIiBzdHJva2Utd2lkdGg9IjIiLz4KPGRlZnM+CjxsaW5lYXJHcmFkaWVudCBpZD0icGFpbnQwX2xpbmVhcl8yODIxXzMxNjcyIiB4MT0iMTIiIHkxPSIwIiB4Mj0iMTIiIHkyPSIyNCIgZ3JhZGllbnRVbml0cz0idXNlclNwYWNlT25Vc2UiPgo8c3RvcCBzdG9wLWNvbG9yPSIjQzE4M0ZGIi8+CjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzREQzlGRiIvPgo8L2xpbmVhckdyYWRpZW50Pgo8L2RlZnM+Cjwvc3ZnPgo=)](https://app.osaas.io/browse/eyevinn-web-video-review)
+
+</div>
+
+---
+
 ![Web Video Review Interface](screenshot1.png)
 
 ## Features
@@ -21,24 +34,6 @@ A professional web application for reviewing broadcast video files stored in S3-
 - **Docker Support**: Single container architecture with easy deployment
 
 ![Video Analysis Tools](screenshot2.png)
-
-## 🚀 Instant Cloud Deployment
-
-**Skip the setup and deploy instantly!** Get Web Video Review running in the cloud with just a few clicks - no infrastructure management required.
-
-[![Deploy on Open Source Cloud](https://img.shields.io/badge/Deploy%20on-Open%20Source%20Cloud-blue?style=for-the-badge&logo=cloud)](https://app.osaas.io/browse/eyevinn-web-video-review)
-
-### Why Choose Open Source Cloud?
-
-- **⚡ Deploy in seconds** - No Docker, servers, or configuration needed
-- **🔐 Secure by default** - Enterprise-grade security and data protection
-- **📈 Auto-scaling** - Handles traffic spikes automatically
-- **💰 Cost-effective** - Pay only for what you use, no infrastructure overhead
-- **🛠️ Fully managed** - Automatic updates, backups, and monitoring included
-
-Simply click the deploy button above, add your S3 credentials, and start reviewing videos immediately!
-
----
 
 ## Architecture
 
