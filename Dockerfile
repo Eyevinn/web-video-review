@@ -1,5 +1,5 @@
 # Combined Dockerfile for Video Review Application
-FROM node:18-alpine
+FROM node:24-alpine
 
 # Install system dependencies including FFmpeg and nginx
 RUN apk add --no-cache \

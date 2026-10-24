@@ -78,7 +78,7 @@ The application will be available at `http://localhost:3001`.
 
 ### Prerequisites
 
-- Node.js 18+ and npm
+- Node.js 24 (>= 24.22.1) and npm
 - FFmpeg installed and accessible in PATH
 - S3-compatible storage with video files
 - S3 access credentials
